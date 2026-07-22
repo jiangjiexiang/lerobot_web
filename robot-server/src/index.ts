@@ -3,6 +3,8 @@ import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import cors from "cors";
 import path from "path";
+import fs from "fs";
+import { timingSafeEqual } from "crypto";
 import { execSync } from "child_process";
 import { RobotBridge, BridgeMessage } from "./robotBridge";
 import { MJPEGStreamManager } from "./streams";
@@ -13,6 +15,7 @@ const BRIDGE_DIR = process.env.BRIDGE_DIR || path.join(__dirname, "../../bridge"
 const TELEOP_SCRIPT = path.join(BRIDGE_DIR, "teleop_mujoco.py");
 const PYTHON_PATH = process.env.PYTHON_PATH || "/home/jiang/miniconda3/envs/lerobot/bin/python";
 const FRONTEND_DIST = path.join(__dirname, "../../frontend/dist");
+const REMOTE_CONTROL_TOKEN = process.env.REMOTE_CONTROL_TOKEN || "";
 
 const app = express();
 app.use(cors());
@@ -25,8 +28,17 @@ const streamManager = new MJPEGStreamManager();
 
 // 桥接状态
 let bridge: RobotBridge | null = null;
+let stopping = false;
+let remoteLeaderActive = false;
 let latestObservation: BridgeMessage | null = null;
 const clients = new Set<WebSocket>();
+
+function validRemoteToken(token: unknown): boolean {
+  if (!REMOTE_CONTROL_TOKEN || typeof token !== "string") return false;
+  const supplied = Buffer.from(token);
+  const expected = Buffer.from(REMOTE_CONTROL_TOKEN);
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
 
 // ===================== API =====================
 
@@ -50,10 +62,25 @@ app.get("/api/ports", (req, res) => {
   }
 });
 
+// 仅向已打开控制台的浏览器提供指定 Leader 的公开标定数据；ID 限制防止路径穿越。
+app.get("/api/calibration/leader/:id", (req, res) => {
+  const id = req.params.id;
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) {
+    res.status(400).json({ ok: false, error: "无效的 Leader ID" });
+    return;
+  }
+  const file = path.join(process.env.HOME || "/home/jiang", ".lerobot", "calibration", "so101_leader", `${id}.json`);
+  try {
+    res.json({ ok: true, calibration: JSON.parse(fs.readFileSync(file, "utf-8")) });
+  } catch {
+    res.status(404).json({ ok: false, error: `找不到 Leader 标定文件: ${id}` });
+  }
+});
+
 // 启动遥操作
 app.post("/api/start", (req, res) => {
   if (bridge && bridge.isRunning()) {
-    res.status(400).json({ ok: false, error: "已在运行中" });
+    res.status(400).json({ ok: false, error: stopping ? "正在停止，请稍候" : "已在运行中" });
     return;
   }
 
@@ -64,7 +91,16 @@ app.post("/api/start", (req, res) => {
     leader_id = "",
     fps = 30,
     viewer = false,
+    remote_leader = false,
+    remote_token = "",
+    camera_index = -1,
+    camera_fps = 15,
   } = req.body;
+
+  if (remote_leader && !validRemoteToken(remote_token)) {
+    res.status(403).json({ ok: false, error: "远程控制密钥无效，或机器人端未设置 REMOTE_CONTROL_TOKEN" });
+    return;
+  }
 
   const args = [
     "--follower-port", follower_port,
@@ -74,12 +110,19 @@ app.post("/api/start", (req, res) => {
     "--fps", String(fps),
   ];
   if (viewer) args.push("--viewer");
+  if (remote_leader) args.push("--remote-leader");
+  if (Number.isInteger(camera_index) && camera_index >= 0) {
+    args.push("--camera-index", String(camera_index), "--camera-fps", String(camera_fps));
+  }
 
   console.log(`[Server] 启动遥操作: ${PYTHON_PATH} ${TELEOP_SCRIPT} ${args.join(" ")}`);
 
-  bridge = new RobotBridge(TELEOP_SCRIPT, args, PYTHON_PATH);
+  const startedBridge = new RobotBridge(TELEOP_SCRIPT, args, PYTHON_PATH);
+  bridge = startedBridge;
+  stopping = false;
+  remoteLeaderActive = Boolean(remote_leader);
 
-  bridge.on("message", (msg: BridgeMessage) => {
+  startedBridge.on("message", (msg: BridgeMessage) => {
     switch (msg.type) {
       case "teleop_observation":
         latestObservation = msg;
@@ -97,6 +140,7 @@ app.post("/api/start", (req, res) => {
       case "camera_frame":
         if (msg.data) {
           streamManager.updateFrameFromBase64("camera", msg.data);
+          broadcast(msg);
         }
         break;
 
@@ -105,17 +149,22 @@ app.post("/api/start", (req, res) => {
     }
   });
 
-  bridge.on("exit", (code) => {
+  startedBridge.on("exit", (code) => {
     console.log(`[Server] 遥操作进程退出 (code=${code})`);
-    bridge = null;
-    broadcast({ type: "stopped" });
+    // 旧进程的退出不能影响之后启动的新进程。
+    if (bridge === startedBridge) {
+      bridge = null;
+      stopping = false;
+      remoteLeaderActive = false;
+      broadcast({ type: "stopped" });
+    }
   });
 
-  bridge.on("error", (err) => {
+  startedBridge.on("error", (err) => {
     console.error(`[Server] 桥接错误:`, err);
   });
 
-  bridge.start();
+  startedBridge.start();
   broadcast({ type: "status", running: true });
   res.json({ ok: true, msg: "遥操作已启动" });
 });
@@ -127,7 +176,7 @@ app.post("/api/stop", (req, res) => {
     return;
   }
   const activeBridge = bridge;
-  bridge = null;
+  stopping = true;
   activeBridge.stop();
   // 不等待 Python 清理完成才更新界面，避免停止按钮看起来没有反应。
   broadcast({ type: "status", running: false });
@@ -137,7 +186,7 @@ app.post("/api/stop", (req, res) => {
 // 状态查询
 app.get("/api/status", (req, res) => {
   res.json({
-    running: bridge ? bridge.isRunning() : false,
+    running: bridge ? bridge.isRunning() && !stopping : false,
     clients: clients.size,
   });
 });
@@ -155,7 +204,7 @@ app.get("/video/camera", (req, res) => {
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
-    bridge_running: bridge ? bridge.isRunning() : false,
+    bridge_running: bridge ? bridge.isRunning() && !stopping : false,
     clients_connected: clients.size,
     has_observation: latestObservation !== null,
   });
@@ -185,7 +234,7 @@ wss.on("connection", (ws) => {
   clients.add(ws);
 
   // 发送当前状态
-  ws.send(JSON.stringify({ type: "status", running: bridge ? bridge.isRunning() : false }));
+  ws.send(JSON.stringify({ type: "status", running: bridge ? bridge.isRunning() && !stopping : false }));
 
   // 发送最新 observation
   if (latestObservation) {
@@ -195,7 +244,7 @@ wss.on("connection", (ws) => {
   ws.on("message", (data) => {
     try {
       const msg = JSON.parse(data.toString());
-      if (msg.type === "action" && bridge) {
+      if (msg.type === "action" && bridge && remoteLeaderActive && validRemoteToken(msg.token)) {
         bridge.send(msg);
       }
     } catch (err) {

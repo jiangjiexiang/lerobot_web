@@ -17,20 +17,25 @@
           :ports="ports"
           :running="running"
           :busy="actionPending"
-          :logs="logs"
+          :serial-connected="serialConnected"
+          :serial-error="serialError"
           @refresh="fetchPorts"
           @start="handleStart"
           @stop="handleStop"
+          @connect-leader="handleConnectLeader"
+          @disconnect-leader="disconnectLeader"
         />
       </section>
 
-      <section class="panel view" aria-label="MuJoCo 仿真画面">
-        <MuJoCoView :frame="mujocoFrame" />
+      <section class="visuals" aria-label="机器人可视化">
+        <section class="panel view" aria-label="MuJoCo 仿真画面"><MuJoCoView :frame="mujocoFrame" /></section>
+        <section class="panel camera" aria-label="机器人摄像头画面"><CameraView :frame="cameraFrame" /></section>
       </section>
 
-      <section class="panel joints" aria-label="实时关节数据">
-        <JointPanel :leader="leaderJoints" :follower="followerJoints" />
-      </section>
+      <aside class="right-rail" aria-label="实时状态与日志">
+        <section class="panel joints" aria-label="实时关节数据"><JointPanel :leader="leaderJoints" :follower="followerJoints" /></section>
+        <section class="panel logs" aria-label="运行日志"><LogPanel :logs="logs" /></section>
+      </aside>
     </main>
   </div>
 </template>
@@ -41,7 +46,10 @@ import { useWebSocket } from "./composables/useWebSocket";
 import StatusBar from "./components/StatusBar.vue";
 import ControlPanel from "./components/ControlPanel.vue";
 import MuJoCoView from "./components/MuJoCoView.vue";
+import CameraView from "./components/CameraView.vue";
 import JointPanel from "./components/JointPanel.vue";
+import LogPanel from "./components/LogPanel.vue";
+import { useLeaderSerial } from "./composables/useLeaderSerial";
 
 const {
   connected,
@@ -49,9 +57,12 @@ const {
   leaderJoints,
   followerJoints,
   mujocoFrame,
+  cameraFrame,
   logs,
   log,
+  send,
 } = useWebSocket();
+const { connected: serialConnected, error: serialError, connect: connectLeader, disconnect: disconnectLeader } = useLeaderSerial(send, log);
 
 const ports = ref<string[]>([]);
 const actionPending = ref(false);
@@ -77,6 +88,8 @@ async function handleStart(config: Record<string, unknown>) {
     leader_id: config.leaderId,
     fps: config.fps,
     viewer: config.viewer,
+    remote_leader: config.remoteLeader,
+    remote_token: config.remoteToken,
   };
   actionPending.value = true;
   log("正在启动遥操作...");
@@ -99,6 +112,11 @@ async function handleStart(config: Record<string, unknown>) {
   }
 }
 
+async function handleConnectLeader(config: { leaderId: string; fps: number; remoteToken: string }) {
+  try { await connectLeader(config.leaderId, config.fps, config.remoteToken); }
+  catch (error) { log("连接 Leader 失败: " + (error instanceof Error ? error.message : String(error))); }
+}
+
 async function handleStop() {
   if (actionPending.value || !running.value) return;
   actionPending.value = true;
@@ -106,7 +124,10 @@ async function handleStop() {
   try {
     const res = await fetch("/api/stop", { method: "POST" });
     const data = await res.json();
-    if (data.ok) log("已发送停止指令");
+    if (data.ok) {
+      await disconnectLeader();
+      log("已停止，并断开 Leader COM");
+    }
     else log("停止失败: " + data.error);
   } catch (e) {
     log("停止失败: " + e);
@@ -165,9 +186,11 @@ body {
   max-width: 1560px;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: minmax(290px, 340px) minmax(480px, 1fr) minmax(280px, 320px);
+  grid-template-columns: minmax(290px, 340px) minmax(380px, 1fr) minmax(280px, 320px);
+  grid-template-areas: "control visuals rail";
   gap: 18px;
   padding: 24px 28px 32px;
+  align-items: start;
 }
 .panel {
   background: rgba(15, 30, 50, 0.86);
@@ -176,14 +199,19 @@ body {
   padding: 18px;
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.18);
 }
+.ctrl { grid-area: control; }
+.ctrl, .joints, .logs { align-self: start; }
+.view, .camera { width: 100%; }
+.visuals { grid-area: visuals; display: flex; flex-direction: column; gap: 18px; align-self: start; min-width: 0; }
+.right-rail { grid-area: rail; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
 @media (max-width: 1100px) {
-  .main { grid-template-columns: minmax(285px, 340px) minmax(430px, 1fr); }
-  .joints { grid-column: 1 / -1; }
+  .main { grid-template-columns: minmax(285px, 340px) minmax(430px, 1fr); grid-template-areas: "control visuals" "rail rail"; }
+  .right-rail { display: grid; grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 760px) {
   .header, .main { padding-left: 16px; padding-right: 16px; }
-  .main { grid-template-columns: 1fr; padding-top: 16px; }
-  .joints { grid-column: auto; }
+  .main { grid-template-columns: 1fr; grid-template-areas: "control" "visuals" "rail"; padding-top: 16px; }
+  .right-rail { display: flex; }
   .header { align-items: flex-start; gap: 14px; }
 }
 </style>

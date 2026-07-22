@@ -22,16 +22,29 @@
       <input v-model="local.followerId" placeholder="如 R12253102" />
     </div>
 
-    <div class="form-group">
-      <label>Leader 串口 <span>主臂</span></label>
-      <select v-model="local.leaderPort">
-        <option v-for="p in ports" :key="p" :value="p">{{ p }}</option>
-      </select>
+    <div class="form-group leader-mode">
+      <label>主臂连接方式</label>
+      <div class="mode-options" role="group" aria-label="主臂连接方式">
+        <button type="button" :class="{ active: !local.remoteLeader }" @click="local.remoteLeader = false">本机串口</button>
+        <button type="button" :class="{ active: local.remoteLeader }" @click="local.remoteLeader = true">网页 COM <span>双电脑</span></button>
+      </div>
+      <small v-if="local.remoteLeader" class="field-note">操作电脑使用 HTTPS 的 Chrome / Edge 连接 Leader COM。</small>
+      <template v-else>
+        <label>Leader 串口 <span>主臂</span></label>
+        <select v-model="local.leaderPort">
+          <option v-for="p in ports" :key="p" :value="p">{{ p }}</option>
+        </select>
+      </template>
     </div>
 
     <div class="form-group">
       <label>Leader ID</label>
       <input v-model="local.leaderId" placeholder="如 R07253102" />
+    </div>
+
+    <div v-if="local.remoteLeader" class="form-group">
+      <label>远程控制密钥</label>
+      <input v-model="local.remoteToken" type="password" autocomplete="off" placeholder="机器人端 REMOTE_CONTROL_TOKEN" />
     </div>
 
     <div class="row2">
@@ -52,7 +65,15 @@
       </div>
     </div>
 
-    <button class="btn btn-start" :disabled="running || busy" @click="$emit('start', { ...local, viewer: viewerVal })">
+    <template v-if="local.remoteLeader">
+      <button class="btn btn-connect" :disabled="serialConnected || !local.remoteToken" @click="$emit('connectLeader', { leaderId: local.leaderId, fps: local.fps, remoteToken: local.remoteToken })">
+        {{ serialConnected ? "Leader COM 已连接" : "连接 Leader COM" }}
+      </button>
+      <button class="btn btn-disconnect" :disabled="!serialConnected" @click="$emit('disconnectLeader')">断开 Leader COM</button>
+      <p v-if="serialError" class="serial-error">{{ serialError }}</p>
+    </template>
+
+    <button class="btn btn-start" :disabled="running || busy || (local.remoteLeader && !serialConnected)" @click="$emit('start', { ...local, viewer: viewerVal })">
       {{ busy && !running ? "正在启动…" : running ? "遥操作运行中" : "启动遥操作" }}
     </button>
     <button class="btn btn-stop" :disabled="!running || busy" @click="$emit('stop')">
@@ -60,9 +81,6 @@
     </button>
 
     <p class="hint">网页仿真画面始终显示；可选同时打开本机 MuJoCo 窗口。</p>
-    <div class="log-box" aria-live="polite">
-      <div v-for="(line, i) in logs" :key="i" class="log-line">{{ line }}</div>
-    </div>
   </div>
 </template>
 
@@ -73,13 +91,16 @@ const props = defineProps<{
   ports: string[];
   running: boolean;
   busy: boolean;
-  logs: string[];
+  serialConnected: boolean;
+  serialError: string | null;
 }>();
 
 const emit = defineEmits<{
   start: [config: Record<string, unknown>];
   stop: [];
   refresh: [];
+  connectLeader: [config: { leaderId: string; fps: number; remoteToken: string }];
+  disconnectLeader: [];
 }>();
 
 const local = reactive({
@@ -88,6 +109,8 @@ const local = reactive({
   leaderPort: "",
   leaderId: "R07253102",
   fps: 30,
+  remoteLeader: false,
+  remoteToken: "",
 });
 
 const viewerVal = ref(false);
@@ -133,6 +156,12 @@ h2 { font-size: 18px; margin-top: 3px; letter-spacing: -0.25px;
   font-size: 14px;
 }
 .form-group label span { color: #6f91aa; font-size: 11px; }
+.field-note { display: block; color: #7894ab; line-height: 1.4; margin-top: 5px; }
+.leader-mode { margin-bottom: 12px; }
+.mode-options { display: grid; grid-template-columns: 1fr 1.25fr; gap: 5px; padding: 4px; border: 1px solid #29435f; border-radius: 9px; background: #0a1728; }
+.mode-options button { min-height: 34px; padding: 5px 6px; border: 0; border-radius: 6px; background: transparent; color: #8098ad; font-size: 12px; cursor: pointer; transition: background .18s, color .18s; }
+.mode-options button.active { color: #e7f9ff; background: #1b5273; box-shadow: 0 2px 8px rgba(0,0,0,.18); }
+.mode-options span { display: block; margin-top: 1px; color: inherit; font-size: 10px; opacity: .7; }
 .btn-refresh {
   background: #102941;
   border: 1px solid #315574;
@@ -178,25 +207,13 @@ h2 { font-size: 18px; margin-top: 3px; letter-spacing: -0.25px;
 .btn-stop:hover {
   background: #c73e54;
 }
+.btn-connect { background: #1c5c86; color: #e9f7ff; }
+.btn-disconnect { background: #495a6b; color: #f3f7fb; }
+.serial-error { color: #ff9aaa; font-size: 11px; margin-top: 7px; }
 .btn:disabled {
   background: #26384c;
   cursor: not-allowed;
   opacity: 0.5;
-}
-.log-box {
-  font-size: 12px;
-  color: #8ba1b5;
-  margin-top: 12px;
-  max-height: 120px;
-  overflow-y: auto;
-  font-family: monospace;
-  background: #091522;
-  border: 1px solid #213a52;
-  border-radius: 8px;
-  padding: 8px;
-}
-.log-line {
-  line-height: 1.6;
 }
 .hint { margin-top: 12px; font-size: 11px; line-height: 1.5; color: #7690a8; }
 </style>

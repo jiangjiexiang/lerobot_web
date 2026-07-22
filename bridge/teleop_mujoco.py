@@ -15,7 +15,9 @@ import base64
 import json
 import logging
 import os
+import signal
 import sys
+import threading
 import time
 
 import cv2
@@ -33,6 +35,62 @@ logger = logging.getLogger(__name__)
 
 MOTOR_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "menagerie_so_arm100", "scene.xml")
+
+
+class RemoteLeaderInput:
+    """从 stdin 接收 robot-server 转发的网页 Leader 动作；永不写入 Leader 串口。"""
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._joints: dict[str, float] | None = None
+        self._updated_at = 0.0
+        threading.Thread(target=self._read_loop, daemon=True).start()
+
+    def _read_loop(self):
+        for line in sys.stdin:
+            try:
+                msg = json.loads(line)
+                joints = msg.get("joints") if msg.get("type") == "action" else None
+                if not isinstance(joints, dict):
+                    continue
+                values = {name: float(joints[name]) for name in MOTOR_NAMES if name in joints}
+                if len(values) != len(MOTOR_NAMES) or not all(np.isfinite(v) for v in values.values()):
+                    continue
+                with self._lock:
+                    self._joints = values
+                    self._updated_at = time.monotonic()
+            except (ValueError, TypeError, json.JSONDecodeError):
+                continue
+
+    def latest(self, timeout_s: float) -> dict | None:
+        with self._lock:
+            if self._joints is None or time.monotonic() - self._updated_at > timeout_s:
+                return None
+            return dict(self._joints)
+
+
+class CameraCapture:
+    """机器人电脑本地摄像头采集；失败不影响遥操作主循环。"""
+    def __init__(self, index: int, width: int = 960, height: int = 540):
+        self.cap = cv2.VideoCapture(index)
+        self.available = self.cap.isOpened()
+        if self.available:
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        else:
+            logger.warning(f"摄像头 {index} 不可用，继续运行但不输出摄像头画面")
+
+    def read_jpeg(self) -> bytes | None:
+        if not self.available:
+            return None
+        ok, frame = self.cap.read()
+        if not ok:
+            return None
+        ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return jpeg.tobytes() if ok else None
+
+    def release(self):
+        if self.cap.isOpened():
+            self.cap.release()
 
 
 def load_calibration(robot_type: str, robot_id: str) -> dict:
@@ -197,10 +255,14 @@ def main():
     parser = argparse.ArgumentParser(description="单进程遥操作 + MuJoCo 镜像")
     parser.add_argument("--follower-port", type=str, required=True, help="Follower 串口")
     parser.add_argument("--follower-id", type=str, default="", help="Follower ID")
-    parser.add_argument("--leader-port", type=str, required=True, help="Leader 串口")
+    parser.add_argument("--leader-port", type=str, default="", help="Leader 串口")
     parser.add_argument("--leader-id", type=str, default="", help="Leader ID")
     parser.add_argument("--fps", type=int, default=30, help="循环频率")
     parser.add_argument("--viewer", action="store_true", help="打开 MuJoCo 交互式查看器")
+    parser.add_argument("--remote-leader", action="store_true", help="从 stdin 接收网页 Leader 动作")
+    parser.add_argument("--command-timeout", type=float, default=0.15, help="远程动作超时秒数")
+    parser.add_argument("--camera-index", type=int, default=-1, help="摄像头索引；-1 禁用")
+    parser.add_argument("--camera-fps", type=int, default=15, help="摄像头最大帧率")
     args = parser.parse_args()
 
     # === 连接 Follower ===
@@ -219,12 +281,37 @@ def main():
     follower_bus.enable_torque()
     logger.info("Follower 电机配置完成 (位置模式)")
 
-    # === 连接 Leader ===
-    logger.info(f"连接 Leader: port={args.leader_port}")
-    leader_bus, leader_has_calib = create_bus(args.leader_port, "so101_leader", args.leader_id)
-    leader_bus.connect()
-    leader_bus.disable_torque()
-    logger.info(f"Leader 连接成功 (仅读取模式, 标定: {'有' if leader_has_calib else '无'})")
+    # === 连接 Leader / 接收远程 Leader ===
+    remote_leader = RemoteLeaderInput() if args.remote_leader else None
+    leader_bus = None
+    if remote_leader:
+        leader_has_calib = True
+        logger.info(f"远程 Leader 模式：等待网页动作（超时 {args.command_timeout:.2f}s 时保持当前位置）")
+    else:
+        if not args.leader_port:
+            parser.error("本机 Leader 模式必须提供 --leader-port")
+        logger.info(f"连接 Leader: port={args.leader_port}")
+        leader_bus, leader_has_calib = create_bus(args.leader_port, "so101_leader", args.leader_id)
+        leader_bus.connect()
+        leader_bus.disable_torque()
+        logger.info(f"Leader 连接成功 (仅读取模式, 标定: {'有' if leader_has_calib else '无'})")
+
+    def shutdown_from_signal(signum, _frame):
+        """Node 停止子进程时确保从臂不再保持扭矩。"""
+        logger.warning(f"收到信号 {signum}，正在关闭 Follower 扭矩")
+        try:
+            follower_bus.disable_torque()
+            follower_bus.disconnect(disable_torque=False)
+        except Exception as exc:  # 信号处理路径必须尽力清理，不能再次阻塞退出
+            logger.warning(f"Follower 清理失败: {exc}")
+        try:
+            if leader_bus is not None:
+                leader_bus.disconnect()
+        except Exception:
+            pass
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, shutdown_from_signal)
 
     # 无标定时用原始编码器值
     use_raw = not (follower_has_calib and leader_has_calib)
@@ -244,6 +331,24 @@ def main():
 
     period = 1.0 / args.fps
     frame_count = 0
+    camera = CameraCapture(args.camera_index) if args.camera_index >= 0 else None
+    if camera and camera.available:
+        logger.info(f"摄像头 {args.camera_index} 初始化成功（最大 {args.camera_fps} FPS）")
+    next_camera_frame = 0.0
+
+    def emit_camera_frame():
+        nonlocal next_camera_frame
+        if camera is None or not camera.available or time.monotonic() < next_camera_frame:
+            return
+        next_camera_frame = time.monotonic() + 1.0 / max(1, args.camera_fps)
+        jpeg = camera.read_jpeg()
+        if jpeg:
+            print(json.dumps({"type": "camera_frame", "data": base64.b64encode(jpeg).decode("ascii"), "ts": time.time()}), flush=True)
+
+    def get_leader_joints() -> dict:
+        if remote_leader:
+            return remote_leader.latest(args.command_timeout) or {}
+        return read_positions(leader_bus, normalize=not use_raw)
 
     if args.viewer:
         # === 交互式查看器模式 ===
@@ -261,7 +366,7 @@ def main():
                 loop_start = time.perf_counter()
 
                 # 1. 读取 leader 角度
-                leader_joints = read_positions(leader_bus, normalize=not use_raw)
+                leader_joints = get_leader_joints()
 
                 # 2. 发送 leader 角度到 follower
                 goal_pos = {k: v for k, v in leader_joints.items() if k in follower_bus.motors}
@@ -295,6 +400,7 @@ def main():
                     "ts": time.time(),
                 }
                 print(json.dumps(mujoco_msg), flush=True)
+                emit_camera_frame()
 
                 # 等待
                 dt = time.perf_counter() - loop_start
@@ -314,7 +420,7 @@ def main():
                 loop_start = time.perf_counter()
 
                 # 1. 读取 leader 角度
-                leader_joints = read_positions(leader_bus, normalize=not use_raw)
+                leader_joints = get_leader_joints()
 
                 # 2. 发送到 follower
                 goal_pos = {k: v for k, v in leader_joints.items() if k in follower_bus.motors}
@@ -345,6 +451,7 @@ def main():
                     "ts": time.time(),
                 }
                 print(json.dumps(mujoco_msg), flush=True)
+                emit_camera_frame()
 
                 # 等待
                 dt = time.perf_counter() - loop_start
@@ -362,7 +469,10 @@ def main():
     # 清理
     follower_bus.disable_torque()
     follower_bus.disconnect()
-    leader_bus.disconnect()
+    if camera is not None:
+        camera.release()
+    if leader_bus is not None:
+        leader_bus.disconnect()
     logger.info("已断开所有连接")
 
 

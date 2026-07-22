@@ -7,9 +7,25 @@ set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHON_PATH="${PYTHON_PATH:-/home/jiang/miniconda3/envs/lerobot/bin/python}"
 export PORT="${PORT:-3000}"
+export REMOTE_CONTROL_TOKEN="${REMOTE_CONTROL_TOKEN:-}"
+HTTPS_CERT="${HTTPS_CERT:-}"
+HTTPS_KEY="${HTTPS_KEY:-}"
 
 echo "=== SO-101 遥操作一键启动 ==="
 echo "Python: $PYTHON_PATH"
+if [ -z "$REMOTE_CONTROL_TOKEN" ]; then
+    echo "提示: 未设置 REMOTE_CONTROL_TOKEN，浏览器 Web Serial 远程模式将被拒绝。"
+fi
+if [ -n "$HTTPS_CERT" ] || [ -n "$HTTPS_KEY" ]; then
+    if [ ! -f "$HTTPS_CERT" ] || [ ! -f "$HTTPS_KEY" ]; then
+        echo "错误: HTTPS_CERT 或 HTTPS_KEY 文件不存在"
+        exit 1
+    fi
+    export HTTPS_CERT HTTPS_KEY
+    WEB_SCHEME="https"
+else
+    WEB_SCHEME="http"
+fi
 echo ""
 
 # 检查 Python
@@ -68,7 +84,7 @@ done
 echo "[4/4] 启动 Vite 前端 (端口 5173)..."
 echo ""
 echo "========================================"
-echo "  浏览器打开: http://localhost:5173"
+echo "  浏览器打开: $WEB_SCHEME://localhost:5173"
 echo "  API 服务:   http://localhost:$PORT"
 echo "  Ctrl+C 退出"
 echo "========================================"
