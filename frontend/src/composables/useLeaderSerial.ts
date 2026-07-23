@@ -54,6 +54,16 @@ export function useLeaderSerial(send: (message: object) => void, log: (message: 
     return response[5] | (response[6] << 8);
   }
 
+  async function disableLeaderTorque() {
+    if (!writer) throw new Error("串口尚未连接");
+    // 与 LeRobot 的 leader_bus.disable_torque() 对齐：关闭扭矩并解除锁定，
+    // 使主臂可被手动拖动。只写 Leader，绝不向 Follower 发送此指令。
+    for (let id = 1; id <= 6; id += 1) {
+      await writer.write(packet(id, 0x03, [40, 0])); // Torque_Enable = 0
+      await writer.write(packet(id, 0x03, [55, 0])); // Lock = 0
+    }
+  }
+
   function normalize(raw: number, name: keyof JointData, cal: Calibration["shoulder_pan"]): number {
     const bounded = Math.max(cal.range_min, Math.min(cal.range_max, raw));
     if (name === "gripper") {
@@ -79,9 +89,10 @@ export function useLeaderSerial(send: (message: object) => void, log: (message: 
     reader = port.readable?.getReader() || null;
     writer = port.writable?.getWriter() || null;
     if (!reader || !writer) throw new Error("无法打开串口读写通道");
+    await disableLeaderTorque();
     connected.value = true;
     active = true;
-    log("Leader COM 已连接，开始只读采样");
+    log("Leader COM 已连接，已关闭 Leader 扭矩，开始只读采样");
 
     const interval = Math.max(16, Math.round(1000 / Math.min(60, Math.max(1, fps))));
     const poll = async () => {
