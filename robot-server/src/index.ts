@@ -13,7 +13,7 @@ const PORT = parseInt(process.env.PORT || "3000");
 const BRIDGE_DIR = process.env.BRIDGE_DIR || path.join(__dirname, "../../bridge");
 const TELEOP_SCRIPT = path.join(BRIDGE_DIR, "teleop_mujoco.py");
 const CAMERA_SCRIPT = path.join(BRIDGE_DIR, "camera_stream.py");
-const PYTHON_PATH = process.env.PYTHON_PATH || "/home/jiang/miniconda3/envs/lerobot/bin/python";
+const PYTHON_PATH = process.env.PYTHON_PATH || "/home/nvidia/miniconda3/envs/lerobot/bin/python";
 const FRONTEND_DIST = path.join(__dirname, "../../frontend/dist");
 
 const app = express();

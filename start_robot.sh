@@ -5,8 +5,8 @@
 set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-export PYTHON_PATH="${PYTHON_PATH:-/home/jiang/miniconda3/envs/lerobot/bin/python}"
-export PORT="${PORT:-3000}"
+export PYTHON_PATH="${PYTHON_PATH:-/home/nvidia/miniconda3/envs/lerobot/bin/python}"
+export PORT="${PORT:-3001}"
 HTTPS_CERT="${HTTPS_CERT:-}"
 HTTPS_KEY="${HTTPS_KEY:-}"
 
