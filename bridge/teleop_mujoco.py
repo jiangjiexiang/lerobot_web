@@ -353,6 +353,8 @@ def main():
     def emit_mujoco_frame():
         """画面是可丢弃数据；绝不能让其编码速度拖慢关节控制。"""
         nonlocal next_stream_frame
+        if args.stream_fps <= 0:
+            return
         now = time.monotonic()
         if now < next_stream_frame:
             return

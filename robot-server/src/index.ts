@@ -15,6 +15,10 @@ const TELEOP_SCRIPT = path.join(BRIDGE_DIR, "teleop_mujoco.py");
 const CAMERA_SCRIPT = path.join(BRIDGE_DIR, "camera_stream.py");
 const PYTHON_PATH = process.env.PYTHON_PATH || "/home/jiang/miniconda3/envs/lerobot/bin/python";
 const FRONTEND_DIST = path.join(__dirname, "../../frontend/dist");
+const ENABLE_CAMERA = process.env.ENABLE_CAMERA !== "0" && process.env.ENABLE_CAMERA !== "false";
+const CAMERA_FPS = parseInt(process.env.CAMERA_FPS || "15", 10);
+const DEFAULT_STREAM_FPS = parseInt(process.env.STREAM_FPS || "0", 10);
+const DEFAULT_CAMERA_INDEX = parseInt(process.env.CAMERA_INDEX || "0", 10);
 
 const app = express();
 app.use(cors());
@@ -32,17 +36,28 @@ let remoteLeaderActive = false;
 let latestObservation: BridgeMessage | null = null;
 const clients = new Set<WebSocket>();
 
-// 摄像头独立于遥操作启动，网页打开后即可显示机器人视角。
-const cameraBridge = new RobotBridge(CAMERA_SCRIPT, ["--camera-index", "0", "--fps", "15"], PYTHON_PATH);
-cameraBridge.on("message", (msg: BridgeMessage) => {
-  if (msg.type === "camera_frame" && msg.data) {
-    streamManager.updateFrameFromBase64("camera", msg.data);
-    broadcast(msg);
-  } else if (msg.type === "camera_error") {
-    console.error(`[Camera] ${String(msg.error || "摄像头不可用")}`);
-  }
-});
-cameraBridge.start();
+// 摄像头是可选资源：默认关闭，避免服务启动时常驻 OpenCV 进程并占用 USB 摄像头。
+let cameraBridge: RobotBridge | null = null;
+let activeCameraIndex = -1;
+function startCamera(index: number): void {
+  if (!ENABLE_CAMERA || index < 0) return;
+  if (cameraBridge) cameraBridge.stop();
+  activeCameraIndex = index;
+  cameraBridge = new RobotBridge(CAMERA_SCRIPT, ["--camera-index", String(index), "--fps", String(CAMERA_FPS)], PYTHON_PATH);
+  cameraBridge.on("message", (msg: BridgeMessage) => {
+    if (msg.type === "camera_frame" && msg.data) {
+      streamManager.updateFrameFromBase64("camera", msg.data);
+      broadcast(msg);
+    } else if (msg.type === "camera_error") console.error(`[Camera] ${String(msg.error || "摄像头不可用")}`);
+  });
+  cameraBridge.start();
+  console.log(`[Camera] 已启用 /dev/video${index} (${CAMERA_FPS} FPS)`);
+}
+if (ENABLE_CAMERA) {
+  startCamera(DEFAULT_CAMERA_INDEX);
+} else {
+  console.log("[Camera] 默认关闭；需要摄像头时设置 ENABLE_CAMERA=1");
+}
 
 // ===================== API =====================
 
@@ -64,6 +79,14 @@ app.get("/api/ports", (req, res) => {
   } catch {
     res.json({ ports: [] });
   }
+});
+
+app.get("/api/cameras", (req, res) => {
+  try {
+    const cameras = fs.readdirSync("/dev").filter((name) => /^video\\d+$/.test(name)).sort()
+      .map((name) => ({ index: Number(name.slice(5)), path: `/dev/${name}` }));
+    res.json({ cameras, active: activeCameraIndex });
+  } catch { res.json({ cameras: [], active: activeCameraIndex }); }
 });
 
 // 仅向已打开控制台的浏览器提供指定 Leader 的公开标定数据；ID 限制防止路径穿越。
@@ -94,12 +117,16 @@ app.post("/api/start", (req, res) => {
     leader_port = "/dev/ttyACM1",
     leader_id = "",
     fps = 30,
-    stream_fps = 20,
+    stream_fps = DEFAULT_STREAM_FPS,
     viewer = false,
     remote_leader = false,
     camera_index = -1,
     camera_fps = 15,
   } = req.body;
+
+  if (ENABLE_CAMERA && Number.isInteger(camera_index) && camera_index >= 0 && camera_index !== activeCameraIndex) {
+    startCamera(camera_index);
+  }
 
   const args = [
     "--follower-port", follower_port,
@@ -283,6 +310,7 @@ server.listen(PORT, "0.0.0.0", () => {
 process.on("SIGINT", () => {
   console.log("[Robot Server] 退出中...");
   if (bridge) bridge.stop();
+  if (cameraBridge) cameraBridge.stop();
   for (const client of clients) client.close();
   server.close();
   process.exit(0);

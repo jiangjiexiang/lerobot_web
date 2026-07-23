@@ -31,6 +31,8 @@ cd ~/lerobot_web
 
 打开 `http://localhost:5173`。页面中确认串口和 ID 后启动遥操作；建议先选择“仅网页画面”。
 
+默认启动为轻量模式：关闭 MuJoCo 网页推流，控制频率为 60 FPS，并开启机器人摄像头（15 FPS）。网页会枚举 `/dev/video*` 并允许选择摄像头。如需关闭摄像头，可使用 `ENABLE_CAMERA=0 ./start_robot.sh`；如需恢复 MuJoCo 网页流，可设置 `STREAM_FPS=10`。
+
 ### 局域网 HTTPS（Web Serial 的前置条件）
 
 若另一台电脑要只通过浏览器连接 Leader 的 COM 口，控制网页必须使用 HTTPS。先在机器人电脑生成包含其局域网 IP 的证书：

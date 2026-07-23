@@ -42,6 +42,14 @@
       <input v-model="local.leaderId" placeholder="如 R07253102" />
     </div>
 
+    <div class="form-group">
+      <label>摄像头</label>
+      <select v-model.number="local.cameraIndex">
+        <option v-for="camera in cameras" :key="camera.index" :value="camera.index">{{ camera.path }}</option>
+        <option v-if="!cameras.length" :value="0">/dev/video0（未检测到，仍尝试启动）</option>
+      </select>
+    </div>
+
     <div class="row2">
       <div class="form-group">
         <label>控制刷新率 FPS</label>
@@ -84,6 +92,7 @@ import { reactive, ref } from "vue";
 
 const props = defineProps<{
   ports: string[];
+  cameras: { index: number; path: string }[];
   running: boolean;
   busy: boolean;
   serialConnected: boolean;
@@ -103,6 +112,7 @@ const local = reactive({
   followerId: "R12253102",
   leaderPort: "",
   leaderId: "R07253102",
+  cameraIndex: 0,
   fps: 60,
   remoteLeader: false,
 });

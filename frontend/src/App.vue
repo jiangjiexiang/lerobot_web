@@ -15,6 +15,7 @@
       <section class="panel ctrl" aria-label="遥操作配置">
         <ControlPanel
           :ports="ports"
+          :cameras="cameras"
           :running="running"
           :busy="actionPending"
           :serial-connected="serialConnected"
@@ -65,6 +66,7 @@ const {
 const { connected: serialConnected, error: serialError, connect: connectLeader, disconnect: disconnectLeader } = useLeaderSerial(send, log);
 
 const ports = ref<string[]>([]);
+const cameras = ref<{ index: number; path: string }[]>([]);
 const actionPending = ref(false);
 
 async function fetchPorts() {
@@ -73,6 +75,8 @@ async function fetchPorts() {
     const data = await res.json();
     ports.value = data.ports || [];
     log(`检测到 ${ports.value.length} 个串口`);
+    const cameraRes = await fetch("/api/cameras");
+    cameras.value = (await cameraRes.json()).cameras || [];
   } catch (e) {
     log("加载串口失败: " + e);
   }
@@ -91,7 +95,7 @@ async function handleStart(config: Record<string, unknown>) {
     remote_leader: config.remoteLeader,
     // 机器人本地 USB 摄像头：/dev/video0 对应 OpenCV 索引 0。
     // 摄像头由 robot-server 的独立 camera_stream 进程采集，避免和遥操作进程抢占设备。
-    camera_index: -1,
+    camera_index: config.cameraIndex,
   };
   actionPending.value = true;
   log("正在启动遥操作...");
