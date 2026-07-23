@@ -35,6 +35,14 @@ export class RobotBridge extends EventEmitter {
       env: { ...process.env },
     });
 
+    // Python 初始化失败或退出后，网页仍可能短暂发送动作。监听 stdin 错误，
+    // 防止 EPIPE 作为未处理错误杀死整个 robot-server。
+    this.process.stdin?.on("error", (err) => {
+      if ((err as NodeJS.ErrnoException).code !== "EPIPE") {
+        console.error(`[RobotBridge] stdin 错误:`, err.message);
+      }
+    });
+
     this.process.stdout?.on("data", (data: Buffer) => {
       this.buffer += data.toString();
       const lines = this.buffer.split("\n");
@@ -70,8 +78,20 @@ export class RobotBridge extends EventEmitter {
   }
 
   send(msg: BridgeMessage): void {
-    if (this.process?.stdin?.writable) {
-      this.process.stdin.write(JSON.stringify(msg) + "\n");
+    const child = this.process;
+    const stdin = child?.stdin;
+    if (!child || child.exitCode !== null || !stdin?.writable || stdin.destroyed) return;
+    try {
+      stdin.write(JSON.stringify(msg) + "\n", (err) => {
+        if (err && (err as NodeJS.ErrnoException).code !== "EPIPE") {
+          console.error(`[RobotBridge] 动作写入失败:`, err.message);
+        }
+      });
+    } catch (err) {
+      // 子进程退出和网页动作之间存在竞争条件；忽略该动作，等待状态广播。
+      if ((err as NodeJS.ErrnoException).code !== "EPIPE") {
+        console.error(`[RobotBridge] 动作写入异常:`, err);
+      }
     }
   }
 
