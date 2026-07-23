@@ -44,7 +44,7 @@
 
     <div class="row2">
       <div class="form-group">
-        <label>刷新率 FPS</label>
+        <label>控制刷新率 FPS</label>
         <select v-model.number="local.fps">
           <option :value="15">15</option>
           <option :value="30">30</option>
@@ -103,7 +103,7 @@ const local = reactive({
   followerId: "R12253102",
   leaderPort: "",
   leaderId: "R07253102",
-  fps: 30,
+  fps: 60,
   remoteLeader: false,
 });
 

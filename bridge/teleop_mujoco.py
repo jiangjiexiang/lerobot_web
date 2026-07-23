@@ -235,7 +235,7 @@ class MuJoCoSim:
     def step(self):
         mujoco.mj_forward(self.model, self.data)
 
-    def render(self) -> bytes:
+    def render(self, jpeg_quality: int = 82) -> bytes:
         self.renderer.update_scene(self.data)
         light = self.renderer._scene.lights[0]
         light.diffuse = np.array([1.0, 1.0, 1.0])
@@ -246,7 +246,7 @@ class MuJoCoSim:
         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         _, jpeg = cv2.imencode(
             ".jpg", frame_bgr,
-            [cv2.IMWRITE_JPEG_QUALITY, 96, cv2.IMWRITE_JPEG_OPTIMIZE, 1],
+            [cv2.IMWRITE_JPEG_QUALITY, max(1, min(100, jpeg_quality))],
         )
         return jpeg.tobytes()
 
@@ -257,7 +257,9 @@ def main():
     parser.add_argument("--follower-id", type=str, default="", help="Follower ID")
     parser.add_argument("--leader-port", type=str, default="", help="Leader 串口")
     parser.add_argument("--leader-id", type=str, default="", help="Leader ID")
-    parser.add_argument("--fps", type=int, default=30, help="循环频率")
+    parser.add_argument("--fps", type=int, default=60, help="控制循环频率")
+    parser.add_argument("--stream-fps", type=int, default=20, help="网页 MuJoCo 画面最大帧率（与控制频率独立）")
+    parser.add_argument("--stream-jpeg-quality", type=int, default=82, help="网页 MuJoCo JPEG 质量（1-100）")
     parser.add_argument("--viewer", action="store_true", help="打开 MuJoCo 交互式查看器")
     parser.add_argument("--remote-leader", action="store_true", help="从 stdin 接收网页 Leader 动作")
     parser.add_argument("--command-timeout", type=float, default=0.15, help="远程动作超时秒数")
@@ -330,7 +332,10 @@ def main():
         logger.info("已加载 home 关键帧")
 
     period = 1.0 / args.fps
+    stream_period = 1.0 / max(1, args.stream_fps)
+    next_stream_frame = 0.0
     frame_count = 0
+    logger.info(f"控制 {args.fps} FPS | 网页 MuJoCo 流 {args.stream_fps} FPS | JPEG 质量 {args.stream_jpeg_quality}")
     camera = CameraCapture(args.camera_index) if args.camera_index >= 0 else None
     if camera and camera.available:
         logger.info(f"摄像头 {args.camera_index} 初始化成功（最大 {args.camera_fps} FPS）")
@@ -344,6 +349,20 @@ def main():
         jpeg = camera.read_jpeg()
         if jpeg:
             print(json.dumps({"type": "camera_frame", "data": base64.b64encode(jpeg).decode("ascii"), "ts": time.time()}), flush=True)
+
+    def emit_mujoco_frame():
+        """画面是可丢弃数据；绝不能让其编码速度拖慢关节控制。"""
+        nonlocal next_stream_frame
+        now = time.monotonic()
+        if now < next_stream_frame:
+            return
+        next_stream_frame = now + stream_period
+        mujoco_jpeg = sim.render(args.stream_jpeg_quality)
+        print(json.dumps({
+            "type": "mujoco_frame",
+            "data": base64.b64encode(mujoco_jpeg).decode("ascii"),
+            "ts": time.time(),
+        }), flush=True)
 
     def get_leader_joints() -> dict:
         if remote_leader:
@@ -393,13 +412,7 @@ def main():
                 print(json.dumps(msg), flush=True)
 
                 # 同时输出网页所需的离屏帧。这样开启原生查看器时，浏览器也能显示仿真画面。
-                mujoco_jpeg = sim.render()
-                mujoco_msg = {
-                    "type": "mujoco_frame",
-                    "data": base64.b64encode(mujoco_jpeg).decode("ascii"),
-                    "ts": time.time(),
-                }
-                print(json.dumps(mujoco_msg), flush=True)
+                emit_mujoco_frame()
                 emit_camera_frame()
 
                 # 等待
@@ -444,13 +457,7 @@ def main():
                 print(json.dumps(obs_msg), flush=True)
 
                 # 6. 输出 MuJoCo 帧
-                mujoco_jpeg = sim.render()
-                mujoco_msg = {
-                    "type": "mujoco_frame",
-                    "data": base64.b64encode(mujoco_jpeg).decode("ascii"),
-                    "ts": time.time(),
-                }
-                print(json.dumps(mujoco_msg), flush=True)
+                emit_mujoco_frame()
                 emit_camera_frame()
 
                 # 等待

@@ -81,6 +81,7 @@ app.post("/api/start", (req, res) => {
     leader_port = "/dev/ttyACM1",
     leader_id = "",
     fps = 30,
+    stream_fps = 20,
     viewer = false,
     remote_leader = false,
     camera_index = -1,
@@ -93,6 +94,7 @@ app.post("/api/start", (req, res) => {
     "--leader-port", leader_port,
     "--leader-id", leader_id,
     "--fps", String(fps),
+    "--stream-fps", String(stream_fps),
   ];
   if (viewer) args.push("--viewer");
   if (remote_leader) args.push("--remote-leader");
@@ -245,8 +247,12 @@ wss.on("connection", (ws) => {
 
 function broadcast(msg: BridgeMessage): void {
   const data = JSON.stringify(msg);
+  const isVideoFrame = msg.type === "mujoco_frame" || msg.type === "camera_frame";
   for (const client of clients) {
     if (client.readyState === WebSocket.OPEN) {
+      // 视频是最新帧优先的数据。客户端网络落后时丢弃本帧，避免 WebSocket
+      // 队列越来越长，从而间接拖慢同一连接上的遥操作动作。
+      if (isVideoFrame && client.bufferedAmount > 512 * 1024) continue;
       client.send(data);
     }
   }
