@@ -89,7 +89,6 @@ async function handleStart(config: Record<string, unknown>) {
     fps: config.fps,
     viewer: config.viewer,
     remote_leader: config.remoteLeader,
-    remote_token: config.remoteToken,
   };
   actionPending.value = true;
   log("正在启动遥操作...");
@@ -112,8 +111,8 @@ async function handleStart(config: Record<string, unknown>) {
   }
 }
 
-async function handleConnectLeader(config: { leaderId: string; fps: number; remoteToken: string }) {
-  try { await connectLeader(config.leaderId, config.fps, config.remoteToken); }
+async function handleConnectLeader(config: { leaderId: string; fps: number }) {
+  try { await connectLeader(config.leaderId, config.fps); }
   catch (error) { log("连接 Leader 失败: " + (error instanceof Error ? error.message : String(error))); }
 }
 

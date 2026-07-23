@@ -42,11 +42,6 @@
       <input v-model="local.leaderId" placeholder="如 R07253102" />
     </div>
 
-    <div v-if="local.remoteLeader" class="form-group">
-      <label>远程控制密钥</label>
-      <input v-model="local.remoteToken" type="password" autocomplete="off" placeholder="机器人端 REMOTE_CONTROL_TOKEN" />
-    </div>
-
     <div class="row2">
       <div class="form-group">
         <label>刷新率 FPS</label>
@@ -66,7 +61,7 @@
     </div>
 
     <template v-if="local.remoteLeader">
-      <button class="btn btn-connect" :disabled="serialConnected || !local.remoteToken" @click="$emit('connectLeader', { leaderId: local.leaderId, fps: local.fps, remoteToken: local.remoteToken })">
+      <button class="btn btn-connect" :disabled="serialConnected" @click="$emit('connectLeader', { leaderId: local.leaderId, fps: local.fps })">
         {{ serialConnected ? "Leader COM 已连接" : "连接 Leader COM" }}
       </button>
       <button class="btn btn-disconnect" :disabled="!serialConnected" @click="$emit('disconnectLeader')">断开 Leader COM</button>
@@ -99,7 +94,7 @@ const emit = defineEmits<{
   start: [config: Record<string, unknown>];
   stop: [];
   refresh: [];
-  connectLeader: [config: { leaderId: string; fps: number; remoteToken: string }];
+  connectLeader: [config: { leaderId: string; fps: number }];
   disconnectLeader: [];
 }>();
 
@@ -110,7 +105,6 @@ const local = reactive({
   leaderId: "R07253102",
   fps: 30,
   remoteLeader: false,
-  remoteToken: "",
 });
 
 const viewerVal = ref(false);

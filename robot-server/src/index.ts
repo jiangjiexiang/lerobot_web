@@ -4,7 +4,6 @@ import { WebSocketServer, WebSocket } from "ws";
 import cors from "cors";
 import path from "path";
 import fs from "fs";
-import { timingSafeEqual } from "crypto";
 import { execSync } from "child_process";
 import { RobotBridge, BridgeMessage } from "./robotBridge";
 import { MJPEGStreamManager } from "./streams";
@@ -15,7 +14,6 @@ const BRIDGE_DIR = process.env.BRIDGE_DIR || path.join(__dirname, "../../bridge"
 const TELEOP_SCRIPT = path.join(BRIDGE_DIR, "teleop_mujoco.py");
 const PYTHON_PATH = process.env.PYTHON_PATH || "/home/jiang/miniconda3/envs/lerobot/bin/python";
 const FRONTEND_DIST = path.join(__dirname, "../../frontend/dist");
-const REMOTE_CONTROL_TOKEN = process.env.REMOTE_CONTROL_TOKEN || "";
 
 const app = express();
 app.use(cors());
@@ -32,13 +30,6 @@ let stopping = false;
 let remoteLeaderActive = false;
 let latestObservation: BridgeMessage | null = null;
 const clients = new Set<WebSocket>();
-
-function validRemoteToken(token: unknown): boolean {
-  if (!REMOTE_CONTROL_TOKEN || typeof token !== "string") return false;
-  const supplied = Buffer.from(token);
-  const expected = Buffer.from(REMOTE_CONTROL_TOKEN);
-  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
-}
 
 // ===================== API =====================
 
@@ -92,15 +83,9 @@ app.post("/api/start", (req, res) => {
     fps = 30,
     viewer = false,
     remote_leader = false,
-    remote_token = "",
     camera_index = -1,
     camera_fps = 15,
   } = req.body;
-
-  if (remote_leader && !validRemoteToken(remote_token)) {
-    res.status(403).json({ ok: false, error: "远程控制密钥无效，或机器人端未设置 REMOTE_CONTROL_TOKEN" });
-    return;
-  }
 
   const args = [
     "--follower-port", follower_port,
@@ -244,7 +229,7 @@ wss.on("connection", (ws) => {
   ws.on("message", (data) => {
     try {
       const msg = JSON.parse(data.toString());
-      if (msg.type === "action" && bridge && remoteLeaderActive && validRemoteToken(msg.token)) {
+      if (msg.type === "action" && bridge && remoteLeaderActive) {
         bridge.send(msg);
       }
     } catch (err) {

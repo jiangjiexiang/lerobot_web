@@ -44,7 +44,6 @@ cd ~/lerobot_web
 ```bash
 HTTPS_CERT="$PWD/.certs/lerobot-lan.crt" \
 HTTPS_KEY="$PWD/.certs/lerobot-lan.key" \
-REMOTE_CONTROL_TOKEN="请替换为随机控制密钥" \
 ./start_robot.sh
 ```
 
@@ -53,7 +52,6 @@ REMOTE_CONTROL_TOKEN="请替换为随机控制密钥" \
 若服务运行在 WSL2，请按 [WSL2 局域网访问控制台](docs/WSL_LAN_ACCESS.md) 配置 Windows 5173 端口转发与防火墙；操作电脑应访问 Windows 的 Wi‑Fi IPv4，而不是 WSL 的 `172.*` 地址。
 
 在网页勾选“浏览器 Web Serial 主臂”，填写 Leader ID 后点击“连接 Leader COM”，在浏览器弹窗中选择该电脑上的 COM 口。连接成功前，“启动遥操作”会保持禁用；这样机器人端不会在没有操作输入时启动。
-网页中的“远程控制密钥”必须与机器人端的 `REMOTE_CONTROL_TOKEN` 完全一致；建议用 `openssl rand -hex 32` 生成。该密钥不会保存到浏览器或仓库。
 
 也可一条命令完成机器人端的证书、密钥和服务启动：
 
@@ -61,7 +59,7 @@ REMOTE_CONTROL_TOKEN="请替换为随机控制密钥" \
 ./start_wifi_robot.sh
 ```
 
-脚本会自动读取 Windows 默认路由网卡的 IPv4，并打印操作电脑需要打开的网页地址、控制密钥及 Windows 管理员端口转发命令。若自动检测不正确，才显式指定 `--host-ip 192.168.1.50`。
+脚本会自动读取 Windows 默认路由网卡的 IPv4，并打印操作电脑需要打开的网页地址及 Windows 管理员端口转发命令。若自动检测不正确，才显式指定 `--host-ip 192.168.1.50`。
 
 服务端口：
 

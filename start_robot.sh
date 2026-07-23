@@ -7,15 +7,11 @@ set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHON_PATH="${PYTHON_PATH:-/home/jiang/miniconda3/envs/lerobot/bin/python}"
 export PORT="${PORT:-3000}"
-export REMOTE_CONTROL_TOKEN="${REMOTE_CONTROL_TOKEN:-}"
 HTTPS_CERT="${HTTPS_CERT:-}"
 HTTPS_KEY="${HTTPS_KEY:-}"
 
 echo "=== SO-101 遥操作一键启动 ==="
 echo "Python: $PYTHON_PATH"
-if [ -z "$REMOTE_CONTROL_TOKEN" ]; then
-    echo "提示: 未设置 REMOTE_CONTROL_TOKEN，浏览器 Web Serial 远程模式将被拒绝。"
-fi
 if [ -n "$HTTPS_CERT" ] || [ -n "$HTTPS_KEY" ]; then
     if [ ! -f "$HTTPS_CERT" ] || [ ! -f "$HTTPS_KEY" ]; then
         echo "错误: HTTPS_CERT 或 HTTPS_KEY 文件不存在"

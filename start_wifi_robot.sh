@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# 双电脑 Wi-Fi 遥操作：机器人电脑一键准备 HTTPS、控制密钥并启动服务。
-# 用法：./start_wifi_robot.sh [--host-ip 192.168.1.50] [--token 自定义密钥]
+# 双电脑 Wi-Fi 遥操作：机器人电脑一键准备 HTTPS 并启动服务。
+# 用法：./start_wifi_robot.sh [--host-ip 192.168.1.50]
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HOST_IP=""
-CONTROL_TOKEN=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -13,12 +12,8 @@ while [[ $# -gt 0 ]]; do
       HOST_IP="${2:-}"
       shift 2
       ;;
-    --token)
-      CONTROL_TOKEN="${2:-}"
-      shift 2
-      ;;
     -h|--help)
-      echo "用法: $0 [--host-ip <Windows Wi-Fi IPv4>] [--token <控制密钥>]"
+      echo "用法: $0 [--host-ip <Windows Wi-Fi IPv4>]"
       exit 0
       ;;
     *)
@@ -38,10 +33,6 @@ if ! [[ "$HOST_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
   exit 2
 fi
 
-if [[ -z "$CONTROL_TOKEN" ]]; then
-  CONTROL_TOKEN="$(openssl rand -hex 32)"
-fi
-
 WSL_IP="$(hostname -I | awk '{print $1}')"
 CERT_DIR="$ROOT_DIR/.certs"
 
@@ -54,13 +45,11 @@ cat > "$ROOT_DIR/.wifi-teleop.env" <<EOF
 # 自动生成；勿提交、勿发送给他人。
 ROBOT_HOST_IP=$HOST_IP
 WSL_IP=$WSL_IP
-REMOTE_CONTROL_TOKEN=$CONTROL_TOKEN
 EOF
 
 echo ""
 echo "=== Wi-Fi 遥操作机器人端已就绪 ==="
 echo "操作电脑网页: https://$HOST_IP:5173"
-echo "控制密钥: $CONTROL_TOKEN"
 echo "WSL IP: $WSL_IP"
 echo ""
 echo "若 Windows 尚未配置端口转发，请以管理员身份运行："
@@ -73,5 +62,4 @@ echo ""
 
 export HTTPS_CERT="$CERT_DIR/lerobot-lan.crt"
 export HTTPS_KEY="$CERT_DIR/lerobot-lan.key"
-export REMOTE_CONTROL_TOKEN="$CONTROL_TOKEN"
 exec "$ROOT_DIR/start_robot.sh"

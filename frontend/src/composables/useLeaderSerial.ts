@@ -63,7 +63,7 @@ export function useLeaderSerial(send: (message: object) => void, log: (message: 
     return (bounded - (cal.range_min + cal.range_max) / 2) * 360 / 4095;
   }
 
-  async function connect(leaderId: string, fps: number, token: string) {
+  async function connect(leaderId: string, fps: number) {
     const serial = (navigator as SerialNavigator).serial;
     if (!serial) throw new Error("当前浏览器不支持 Web Serial；请使用 Chrome 或 Edge，并通过 HTTPS 访问。");
     if (!leaderId) throw new Error("请填写 Leader ID");
@@ -90,7 +90,7 @@ export function useLeaderSerial(send: (message: object) => void, log: (message: 
         const values = {} as JointData;
         for (const name of names) values[name] = normalize(await readPosition(calibration[name].id), name, calibration[name]);
         joints.value = values;
-        send({ type: "action", token, joints: values, ts_ms: Date.now() });
+        send({ type: "action", joints: values, ts_ms: Date.now() });
       } catch (cause) {
         error.value = cause instanceof Error ? cause.message : String(cause);
         log(`Leader 串口错误: ${error.value}`);

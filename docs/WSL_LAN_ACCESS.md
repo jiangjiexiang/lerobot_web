@@ -58,7 +58,6 @@ WSL 中启动：
 ```bash
 HTTPS_CERT="$PWD/.certs/lerobot-lan.crt" \
 HTTPS_KEY="$PWD/.certs/lerobot-lan.key" \
-REMOTE_CONTROL_TOKEN="$(openssl rand -hex 32)" \
 ./start_robot.sh
 ```
 
