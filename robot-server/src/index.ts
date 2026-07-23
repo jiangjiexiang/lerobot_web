@@ -12,6 +12,7 @@ import { MJPEGStreamManager } from "./streams";
 const PORT = parseInt(process.env.PORT || "3000");
 const BRIDGE_DIR = process.env.BRIDGE_DIR || path.join(__dirname, "../../bridge");
 const TELEOP_SCRIPT = path.join(BRIDGE_DIR, "teleop_mujoco.py");
+const CAMERA_SCRIPT = path.join(BRIDGE_DIR, "camera_stream.py");
 const PYTHON_PATH = process.env.PYTHON_PATH || "/home/jiang/miniconda3/envs/lerobot/bin/python";
 const FRONTEND_DIST = path.join(__dirname, "../../frontend/dist");
 
@@ -30,6 +31,18 @@ let stopping = false;
 let remoteLeaderActive = false;
 let latestObservation: BridgeMessage | null = null;
 const clients = new Set<WebSocket>();
+
+// 摄像头独立于遥操作启动，网页打开后即可显示机器人视角。
+const cameraBridge = new RobotBridge(CAMERA_SCRIPT, ["--camera-index", "0", "--fps", "15"], PYTHON_PATH);
+cameraBridge.on("message", (msg: BridgeMessage) => {
+  if (msg.type === "camera_frame" && msg.data) {
+    streamManager.updateFrameFromBase64("camera", msg.data);
+    broadcast(msg);
+  } else if (msg.type === "camera_error") {
+    console.error(`[Camera] ${String(msg.error || "摄像头不可用")}`);
+  }
+});
+cameraBridge.start();
 
 // ===================== API =====================
 

@@ -89,6 +89,9 @@ async function handleStart(config: Record<string, unknown>) {
     fps: config.fps,
     viewer: config.viewer,
     remote_leader: config.remoteLeader,
+    // 机器人本地 USB 摄像头：/dev/video0 对应 OpenCV 索引 0。
+    // 摄像头由 robot-server 的独立 camera_stream 进程采集，避免和遥操作进程抢占设备。
+    camera_index: -1,
   };
   actionPending.value = true;
   log("正在启动遥操作...");
