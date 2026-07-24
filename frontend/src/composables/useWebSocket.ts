@@ -16,6 +16,7 @@ export interface WSMessage {
   running?: boolean;
   data?: string;
   ts?: number;
+  error?: string | null;
   [key: string]: unknown;
 }
 
@@ -39,6 +40,7 @@ export function useWebSocket() {
   const cameraFrame = ref<string | null>(null);
   const camera2Frame = ref<string | null>(null);
   const logs = ref<string[]>([]);
+  const fatalError = ref<string | null>(null);
   const metrics = ref<DebugMetrics>({
     controlFps: 0, controlLatency: null,
     cameraFps: 0, cameraLatency: null, cameraDropped: 0,
@@ -51,8 +53,12 @@ export function useWebSocket() {
   let reconnectTimer: number | null = null;
   let streamReconnectTimer: number | null = null;
   let frameAnimation: number | null = null;
-  let pendingCameraFrame: string | null = null;
-  let pendingCamera2Frame: string | null = null;
+  let pendingCameraFrame: Blob | null = null;
+  let pendingCamera2Frame: Blob | null = null;
+  let pendingCameraTs: number | undefined;
+  let pendingCamera2Ts: number | undefined;
+  let cameraFrameUrl: string | null = null;
+  let camera2FrameUrl: string | null = null;
   let metricsTimer: number | null = null;
   let controlFrames = 0;
   let cameraFrames = 0;
@@ -60,10 +66,30 @@ export function useWebSocket() {
   let cameraDropped = 0;
   let camera2Dropped = 0;
   let disposed = false;
+  let pingTimer: number | null = null;
+  // 机器人上位机时钟与浏览器时钟不同步（无 NTP），直接用两台设备的时间戳相减会得到
+  // 无意义甚至负数的延迟，被 Math.max(0, ...) 钳制后就一直显示 0ms。
+  // 用控制 WebSocket 做一次简易 NTP 式估算：clockOffset = 机器人时钟 - 浏览器时钟。
+  let clockOffset = 0;
+
+  function sendPing() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "ping", ts: Date.now() }));
+  }
+
+  function handlePong(msg: WSMessage) {
+    const clientTs = msg.clientTs as number | undefined;
+    const serverTs = msg.serverTs as number | undefined;
+    if (typeof clientTs !== "number" || typeof serverTs !== "number") return;
+    const rtt = Date.now() - clientTs;
+    // 假设上下行延迟对称，服务端处理时刻约为 clientTs + rtt/2。
+    clockOffset = serverTs - (clientTs + rtt / 2);
+  }
 
   function latency(ts?: number): number | null {
     if (typeof ts !== "number") return null;
-    return Math.max(0, Math.round(Date.now() - ts * 1000));
+    const robotNow = Date.now() + clockOffset;
+    return Math.max(0, Math.round(robotNow - ts * 1000));
   }
 
   function updateMetrics() {
@@ -84,14 +110,44 @@ export function useWebSocket() {
     frameAnimation = requestAnimationFrame(() => {
       frameAnimation = null;
       if (pendingCameraFrame !== null) {
-        cameraFrame.value = pendingCameraFrame;
+        const url = URL.createObjectURL(pendingCameraFrame);
+        if (cameraFrameUrl) URL.revokeObjectURL(cameraFrameUrl);
+        cameraFrameUrl = url;
+        cameraFrame.value = url;
+        metrics.value.cameraLatency = latency(pendingCameraTs);
         pendingCameraFrame = null;
       }
       if (pendingCamera2Frame !== null) {
-        camera2Frame.value = pendingCamera2Frame;
+        const url = URL.createObjectURL(pendingCamera2Frame);
+        if (camera2FrameUrl) URL.revokeObjectURL(camera2FrameUrl);
+        camera2FrameUrl = url;
+        camera2Frame.value = url;
+        metrics.value.camera2Latency = latency(pendingCamera2Ts);
         pendingCamera2Frame = null;
       }
     });
+  }
+
+  function handleBinaryFrame(buffer: ArrayBuffer) {
+    // 帧格式: [1 字节类型][8 字节 timestamp(float64, 秒)][JPEG 字节]，见 robot-server broadcastBinaryFrame。
+    if (buffer.byteLength < 9) return;
+    const view = new DataView(buffer);
+    const streamType = view.getUint8(0);
+    const ts = view.getFloat64(1, true);
+    const jpeg = new Blob([buffer.slice(9)], { type: "image/jpeg" });
+    if (streamType === 1) {
+      cameraFrames += 1;
+      if (pendingCameraFrame !== null) cameraDropped += 1;
+      pendingCameraFrame = jpeg;
+      pendingCameraTs = ts;
+      scheduleFrames();
+    } else if (streamType === 2) {
+      camera2Frames += 1;
+      if (pendingCamera2Frame !== null) camera2Dropped += 1;
+      pendingCamera2Frame = jpeg;
+      pendingCamera2Ts = ts;
+      scheduleFrames();
+    }
   }
 
   function log(msg: string) {
@@ -109,6 +165,7 @@ export function useWebSocket() {
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       connected.value = true;
       log("WebSocket 已连接");
+      sendPing();
     };
 
     ws.onclose = () => {
@@ -139,9 +196,14 @@ export function useWebSocket() {
     if (disposed || (streamWs && (streamWs.readyState === WebSocket.CONNECTING || streamWs.readyState === WebSocket.OPEN))) return;
     const proto = location.protocol === "https:" ? "wss" : "ws";
     streamWs = new WebSocket(`${proto}://${location.host}/ws/stream`);
+    streamWs.binaryType = "arraybuffer";
     streamWs.onopen = () => { metrics.value = { ...metrics.value, streamConnected: true }; };
     streamWs.onmessage = (ev) => {
-      try { handleMessage(JSON.parse(ev.data)); } catch { /* ignore malformed frame */ }
+      if (ev.data instanceof ArrayBuffer) {
+        handleBinaryFrame(ev.data);
+      } else {
+        try { handleMessage(JSON.parse(ev.data)); } catch { /* ignore malformed frame */ }
+      }
     };
     streamWs.onclose = () => {
       metrics.value = { ...metrics.value, streamConnected: false };
@@ -157,36 +219,26 @@ export function useWebSocket() {
 
   function handleMessage(msg: WSMessage) {
     switch (msg.type) {
+      case "pong":
+        handlePong(msg);
+        break;
       case "status":
         running.value = msg.running ?? false;
         break;
       case "stopped":
         running.value = false;
-        log("遥操作进程已退出");
+        if (msg.error) {
+          log(`遥操作进程异常退出: ${msg.error}`);
+          fatalError.value = msg.error;
+        } else {
+          log("遥操作进程已退出");
+        }
         break;
       case "teleop_observation":
         controlFrames += 1;
         metrics.value.controlLatency = latency(msg.ts);
         if (msg.leader) leaderJoints.value = msg.leader;
         if (msg.follower) followerJoints.value = msg.follower;
-        break;
-      case "camera_frame":
-        if (msg.data) {
-          cameraFrames += 1;
-          metrics.value.cameraLatency = latency(msg.ts);
-          if (pendingCameraFrame !== null) cameraDropped += 1;
-          pendingCameraFrame = msg.data;
-          scheduleFrames();
-        }
-        break;
-      case "camera2_frame":
-        if (msg.data) {
-          camera2Frames += 1;
-          metrics.value.camera2Latency = latency(msg.ts);
-          if (pendingCamera2Frame !== null) camera2Dropped += 1;
-          pendingCamera2Frame = msg.data;
-          scheduleFrames();
-        }
         break;
     }
   }
@@ -201,6 +253,8 @@ export function useWebSocket() {
     connect();
     connectStream();
     metricsTimer = window.setInterval(updateMetrics, 1000);
+    // 定期重新估算时钟偏差，避免长时间运行后（时钟漂移、网络路径变化）产生的误差累积。
+    pingTimer = window.setInterval(sendPing, 5000);
   });
   onUnmounted(() => {
     disposed = true;
@@ -208,8 +262,11 @@ export function useWebSocket() {
     if (streamReconnectTimer) clearTimeout(streamReconnectTimer);
     if (frameAnimation !== null) cancelAnimationFrame(frameAnimation);
     if (metricsTimer !== null) clearInterval(metricsTimer);
+    if (pingTimer !== null) clearInterval(pingTimer);
     if (ws) ws.close();
     if (streamWs) streamWs.close();
+    if (cameraFrameUrl) URL.revokeObjectURL(cameraFrameUrl);
+    if (camera2FrameUrl) URL.revokeObjectURL(camera2FrameUrl);
   });
 
   return {
@@ -220,6 +277,7 @@ export function useWebSocket() {
     cameraFrame,
     camera2Frame,
     logs,
+    fatalError,
     metrics,
     log,
     send,

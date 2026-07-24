@@ -12,18 +12,20 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--camera-index", type=int, default=0)
     p.add_argument("--fps", type=int, default=30)
-    p.add_argument("--jpeg-quality", type=int, default=75)
+    p.add_argument("--jpeg-quality", type=int, default=82)
+    p.add_argument("--width", type=int, default=960)
+    p.add_argument("--height", type=int, default=540)
     args = p.parse_args()
 
     cap = cv2.VideoCapture(args.camera_index, cv2.CAP_V4L2)
     if not cap.isOpened():
         print(json.dumps({"type": "camera_error", "error": f"无法打开摄像头 {args.camera_index}"}), flush=True)
         return 1
-    # 该摄像头在 640x480 下优先使用 MJPEG；不指定 FOURCC 时，V4L2
-    # 可能回落到 YUYV，经过 USB/IP 传输后容易出现画面下半部绿色。
+    # 优先使用 MJPEG；不指定 FOURCC 时，V4L2 可能回落到 YUYV，
+    # 经过 USB/IP 传输后容易出现画面下半部绿色。
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
     cap.set(cv2.CAP_PROP_FPS, args.fps)
     # 只保留最新帧，避免 USB 或编码短暂停顿后继续播放缓存中的旧画面。
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

@@ -44,16 +44,16 @@
 
     <div class="row2">
       <div class="form-group">
-        <label>摄像头 1 <span>左侧画面</span></label>
-        <select v-model.number="local.cameraIndex" @change="$emit('switchCamera', { view: 'camera', index: local.cameraIndex })">
-          <option v-for="c in detectedCameras" :key="c" :value="c" :disabled="c === local.camera2Index">/dev/video{{ c }} {{ c === activeCameras.camera ? '✓ 当前' : '' }}</option>
+        <label>摄像头 1</label>
+        <select :value="local.cameraIndex" @change="selectCamera('camera', Number(($event.target as HTMLSelectElement).value))">
+          <option v-for="c in detectedCameras" :key="c" :value="c">/dev/video{{ c }} {{ c === local.cameraIndex ? '✓ 当前' : '' }}</option>
           <option v-if="!detectedCameras.length" disabled>未检测到摄像头</option>
         </select>
       </div>
       <div class="form-group">
-        <label>摄像头 2 <span>右侧画面</span></label>
-        <select v-model.number="local.camera2Index" @change="$emit('switchCamera', { view: 'camera2', index: local.camera2Index })">
-          <option v-for="c in detectedCameras" :key="c" :value="c" :disabled="c === local.cameraIndex">/dev/video{{ c }} {{ c === activeCameras.camera2 ? '✓ 当前' : '' }}</option>
+        <label>摄像头 2</label>
+        <select :value="local.camera2Index" @change="selectCamera('camera2', Number(($event.target as HTMLSelectElement).value))">
+          <option v-for="c in detectedCameras" :key="c" :value="c">/dev/video{{ c }} {{ c === local.camera2Index ? '✓ 当前' : '' }}</option>
           <option v-if="!detectedCameras.length" disabled>未检测到摄像头</option>
         </select>
       </div>
@@ -107,6 +107,7 @@ const emit = defineEmits<{
   stop: [];
   refresh: [];
   switchCamera: [config: { view: string; index: number }];
+  swapCameraViews: [];
   connectLeader: [config: { leaderId: string; fps: number }];
   disconnectLeader: [];
 }>();
@@ -121,6 +122,25 @@ const local = reactive({
   fps: 60,
   remoteLeader: false,
 });
+
+function selectCamera(view: "camera" | "camera2", index: number) {
+  const previousIndex = view === "camera" ? local.cameraIndex : local.camera2Index;
+  const otherIndex = view === "camera" ? local.camera2Index : local.cameraIndex;
+  if (index === otherIndex) {
+    if (view === "camera") {
+      local.cameraIndex = index;
+      local.camera2Index = previousIndex;
+    } else {
+      local.camera2Index = index;
+      local.cameraIndex = previousIndex;
+    }
+    emit("swapCameraViews");
+    return;
+  }
+  if (view === "camera") local.cameraIndex = index;
+  else local.camera2Index = index;
+  emit("switchCamera", { view, index });
+}
 
 
 // 当端口列表变化时，设置默认值
@@ -142,15 +162,6 @@ watch(
     else if (cameras.length >= 1 && !local.camera2Index) local.camera2Index = cameras[0];
   },
   { immediate: true }
-);
-// 同步当前激活的摄像头索引
-watch(
-  () => props.activeCameras,
-  (ac) => {
-    if (ac.camera >= 0) local.cameraIndex = ac.camera;
-    if (ac.camera2 >= 0) local.camera2Index = ac.camera2;
-  },
-  { deep: true }
 );
 </script>
 

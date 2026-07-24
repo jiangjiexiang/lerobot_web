@@ -8,7 +8,7 @@
       <span class="live" :class="{ active: !!frame }"><i></i>{{ frame ? liveText : waitText }}</span>
     </div>
     <div class="video-box">
-      <img v-if="frame" :src="`data:image/jpeg;base64,${frame}`" :alt="title" />
+      <img v-if="frame" :src="frame" :alt="title" />
       <span v-else class="placeholder">{{ placeholder }}<small>{{ hint }}</small></span>
     </div>
   </div>
@@ -49,13 +49,15 @@ h2 { font-size: 18px; margin-top: 3px; letter-spacing: -0.25px; }
   display: flex;
   justify-content: center;
   align-items: center;
-  min-height: 240px;
+  min-height: 360px;
+  aspect-ratio: 4 / 3;
   position: relative;
 }
 .video-box img {
   width: 100%;
   height: auto;
-  max-height: 42vh;
+  height: 100%;
+  max-height: 58vh;
   object-fit: contain;
   display: block;
 }
@@ -66,5 +68,6 @@ h2 { font-size: 18px; margin-top: 3px; letter-spacing: -0.25px; }
 }
 .placeholder small { display: block; margin-top: 8px; color: #597288; font-size: 12px; }
 
-@media (max-width: 760px) { .video-box { min-height: 180px; } }
+@media (max-width: 1100px) { .video-box { min-height: 320px; } }
+@media (max-width: 760px) { .video-box { min-height: 220px; } }
 </style>

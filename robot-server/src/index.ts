@@ -101,8 +101,9 @@ function startCamera(index: number): void {
   cameraBridge.on("message", (msg: BridgeMessage) => {
     if (msg.type === "camera_frame" && msg.data) {
       cameraLastFrameAt = Date.now();
-      streamManager.updateFrameFromBase64("camera", msg.data);
-      broadcastStream(msg);
+      const jpeg = Buffer.from(msg.data, "base64");
+      streamManager.updateFrame("camera", jpeg);
+      broadcastBinaryFrame(STREAM_TYPE_CAMERA, typeof msg.ts === "number" ? msg.ts : Date.now() / 1000, jpeg);
     } else if (msg.type === "camera_error") {
       cameraError = String(msg.error || "摄像头不可用");
       console.error(`[Camera] ${cameraError}`);
@@ -127,8 +128,9 @@ function startCamera2(index: number): void {
   cameraBridge2.on("message", (msg: BridgeMessage) => {
     if (msg.type === "camera_frame" && msg.data) {
       camera2LastFrameAt = Date.now();
-      streamManager.updateFrameFromBase64("camera2", msg.data);
-      broadcastStream({ type: "camera2_frame", data: msg.data, ts: msg.ts });
+      const jpeg = Buffer.from(msg.data, "base64");
+      streamManager.updateFrame("camera2", jpeg);
+      broadcastBinaryFrame(STREAM_TYPE_CAMERA2, typeof msg.ts === "number" ? msg.ts : Date.now() / 1000, jpeg);
     } else if (msg.type === "camera_error") {
       camera2Error = String(msg.error || "摄像头不可用");
       console.error(`[Camera2] ${camera2Error}`);
@@ -329,8 +331,9 @@ app.post("/api/start", (req, res) => {
 
       case "camera_frame":
         if (msg.data) {
-          streamManager.updateFrameFromBase64("camera", msg.data);
-          broadcastStream(msg);
+          const jpeg = Buffer.from(msg.data, "base64");
+          streamManager.updateFrame("camera", jpeg);
+          broadcastBinaryFrame(STREAM_TYPE_CAMERA, typeof msg.ts === "number" ? msg.ts : Date.now() / 1000, jpeg);
         }
         break;
 
@@ -339,14 +342,17 @@ app.post("/api/start", (req, res) => {
     }
   });
 
-  startedBridge.on("exit", (code) => {
+  startedBridge.on("exit", (code, errorLine) => {
     console.log(`[Server] 遥操作进程退出 (code=${code})`);
     // 旧进程的退出不能影响之后启动的新进程。
     if (bridge === startedBridge) {
+      const wasRequested = stopping;
       bridge = null;
       stopping = false;
       remoteLeaderActive = false;
-      broadcastControl({ type: "stopped" });
+      // 非用户主动停止且带非零退出码，说明 Python 侧崩溃；把报错原因推给前端弹窗提示。
+      const crashError = !wasRequested && code !== 0 ? errorLine || `进程异常退出 (code=${code})` : null;
+      broadcastControl({ type: "stopped", error: crashError });
     }
   });
 
@@ -459,6 +465,9 @@ controlWss.on("connection", (ws) => {
       const msg = JSON.parse(data.toString());
       if (msg.type === "action" && bridge?.isRunning() && remoteLeaderActive && !stopping) {
         bridge.send(msg);
+      } else if (msg.type === "ping") {
+        // 用于前端估算浏览器与本机时钟偏差，从而修正跨进程时间戳算出的延迟显示。
+        ws.send(JSON.stringify({ type: "pong", clientTs: msg.ts, serverTs: Date.now() }));
       }
     } catch (err) {
       console.error("[Server] 解析客户端消息失败:", err);
@@ -496,13 +505,21 @@ function broadcastControl(msg: BridgeMessage | object): void {
   }
 }
 
-function broadcastStream(msg: BridgeMessage | object): void {
-  const data = JSON.stringify(msg);
+// 二进制推流帧格式: [1 字节类型][8 字节 timestamp(float64, 秒)][JPEG 字节]。
+// 避免 base64 + JSON 包装：既减少 ~33% 体积，也省去客户端 JSON.parse/base64 解码开销。
+const STREAM_TYPE_CAMERA = 1;
+const STREAM_TYPE_CAMERA2 = 2;
+
+function broadcastBinaryFrame(streamType: number, ts: number, jpeg: Buffer): void {
+  const header = Buffer.alloc(9);
+  header.writeUInt8(streamType, 0);
+  header.writeDoubleLE(ts, 1);
+  const frame = Buffer.concat([header, jpeg]);
   for (const client of streamClients) {
     if (client.readyState === WebSocket.OPEN) {
       // 推流只保留最新帧；慢客户端直接丢弃，绝不形成积压。
       if (client.bufferedAmount > 128 * 1024) continue;
-      client.send(data);
+      client.send(frame);
     }
   }
 }

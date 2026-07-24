@@ -24,16 +24,6 @@ export class MJPEGStreamManager {
   }
 
   /**
-   * 从 base64 字符串更新帧
-   * @param streamName 流名称
-   * @param base64Data base64 编码的 JPEG 数据
-   */
-  updateFrameFromBase64(streamName: string, base64Data: string): void {
-    const buffer = Buffer.from(base64Data, "base64");
-    this.updateFrame(streamName, buffer);
-  }
-
-  /**
    * 处理 MJPEG HTTP 请求，持续推送帧
    */
   handleStream(streamName: string, req: Request, res: Response): void {
@@ -74,13 +64,5 @@ export class MJPEGStreamManager {
     req.on("close", () => {
       clearInterval(interval);
     });
-  }
-
-  /**
-   * 获取最新帧的 base64 数据（用于 WebSocket 传输）
-   */
-  getLatestFrameBase64(streamName: string): string | null {
-    const frame = this.latestFrames.get(streamName);
-    return frame ? frame.toString("base64") : null;
   }
 }

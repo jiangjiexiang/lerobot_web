@@ -22,6 +22,14 @@
         <div class="self-check-actions"><button class="secondary" :disabled="selfCheckRunning" @click="runSelfCheck()">重新检查</button><button class="primary" :disabled="selfCheckRunning" @click="selfCheckVisible = false">进入控制台</button></div>
       </div>
     </div>
+    <div v-if="modalError" class="fatal-overlay" role="alertdialog" aria-modal="true" aria-labelledby="fatal-title">
+      <div class="fatal-modal">
+        <div class="fatal-heading"><span class="fatal-icon">✕</span><h2 id="fatal-title">出现异常</h2></div>
+        <p class="fatal-message">{{ modalError }}</p>
+        <p class="fatal-hint">请检查串口连接、电机供电或标定配置，修复后可重新启动遥操作。</p>
+        <div class="fatal-actions"><button class="primary" @click="modalError = null">知道了</button></div>
+      </div>
+    </div>
     <header class="header">
       <div class="brand">
         <span class="brand-mark">SO</span>
@@ -47,14 +55,15 @@
           @start="handleStart"
           @stop="handleStop"
           @switch-camera="handleSwitchCamera"
+          @swap-camera-views="handleSwapCameraViews"
           @connect-leader="handleConnectLeader"
           @disconnect-leader="disconnectLeader"
         />
       </section>
 
       <section class="visuals" aria-label="机器人可视化">
-        <section class="panel view" aria-label="摄像头 1 画面"><MuJoCoView :frame="cameraFrame" kicker="实时画面" title="摄像头 1 (左侧)" placeholder="等待摄像头 1 画面…" hint="USB 摄像头 1 画面" liveText="LIVE" waitText="READY" /></section>
-        <section class="panel view" aria-label="摄像头 2 画面"><MuJoCoView :frame="camera2Frame" kicker="实时画面" title="摄像头 2 (右侧)" placeholder="等待摄像头 2 画面…" hint="USB 摄像头 2 画面" liveText="LIVE" waitText="READY" /></section>
+        <section class="panel view" aria-label="摄像头 1 画面"><MuJoCoView :frame="cameraViewsSwapped ? camera2Frame : cameraFrame" kicker="实时画面" title="摄像头 1" placeholder="等待摄像头 1 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera2 : activeCameras.camera}`" liveText="LIVE" waitText="READY" /></section>
+        <section class="panel view" aria-label="摄像头 2 画面"><MuJoCoView :frame="cameraViewsSwapped ? cameraFrame : camera2Frame" kicker="实时画面" title="摄像头 2" placeholder="等待摄像头 2 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera : activeCameras.camera2}`" liveText="LIVE" waitText="READY" /></section>
         <section class="console" aria-label="运行控制台"><LogPanel :logs="logs" /></section>
       </section>
 
@@ -83,17 +92,24 @@ const {
   cameraFrame,
   camera2Frame,
   logs,
+  fatalError,
   metrics,
   log,
   send,
 } = useWebSocket();
 const { connected: serialConnected, error: serialError, connect: connectLeader, disconnect: disconnectLeader } = useLeaderSerial(send, log, stopAfterLeaderFailure);
+const modalError = computed({
+  get: () => fatalError.value || frontError.value,
+  set: (value) => { fatalError.value = value; frontError.value = value; },
+});
+const frontError = ref<string | null>(null);
 
 const ports = ref<string[]>([]);
 const cameras = ref<{ index: number; path: string }[]>([]);
 const detectedCameras = ref<number[]>([]);
 const activeCameras = ref<{ camera: number; camera2: number }>({ camera: -1, camera2: -1 });
 const actionPending = ref(false);
+const cameraViewsSwapped = ref(false);
 const selfCheckRunning = ref(false);
 const selfCheck = ref<Record<string, any> | null>(null);
 const selfCheckVisible = ref(true);
@@ -132,6 +148,7 @@ async function runSelfCheck(config?: { followerId?: string }) {
 }
 
 async function stopAfterLeaderFailure() {
+  if (serialError.value) frontError.value = `Leader 串口断开: ${serialError.value}`;
   if (!running.value) return;
   log("Leader 已断开，正在安全停止后端遥操作...");
   try {
@@ -162,14 +179,17 @@ async function fetchPorts() {
 
 async function handleSwitchCamera(config: { view: string; index: number }) {
   try {
+    const backendView = cameraViewsSwapped.value
+      ? (config.view === "camera" ? "camera2" : "camera")
+      : config.view;
     const res = await fetch("/api/camera/switch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(config),
+      body: JSON.stringify({ ...config, view: backendView }),
     });
     const data = await res.json();
     if (data.ok) {
-      const key = config.view === "camera" ? "camera" : "camera2";
+      const key = backendView === "camera" ? "camera" : "camera2";
       activeCameras.value[key] = config.index;
       log(`已切换 ${config.view === "camera" ? "摄像头 1" : "摄像头 2"} 到 /dev/video${config.index}`);
     } else {
@@ -178,6 +198,11 @@ async function handleSwitchCamera(config: { view: string; index: number }) {
   } catch (e) {
     log(`切换摄像头请求失败: ${e}`);
   }
+}
+
+function handleSwapCameraViews() {
+  cameraViewsSwapped.value = !cameraViewsSwapped.value;
+  log("已交换左右摄像头画面");
 }
 
 async function handleStart(config: Record<string, unknown>) {
@@ -218,7 +243,11 @@ async function handleStart(config: Record<string, unknown>) {
 
 async function handleConnectLeader(config: { leaderId: string; fps: number }) {
   try { await connectLeader(config.leaderId, config.fps); }
-  catch (error) { log("连接 Leader 失败: " + (error instanceof Error ? error.message : String(error))); }
+  catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log("连接 Leader 失败: " + message);
+    frontError.value = `连接 Leader 失败: ${message}`;
+  }
 }
 
 async function handleStop() {
@@ -300,6 +329,16 @@ body {
 .self-check-actions .primary { color: #06101a; background: #64d6f4; }
 @keyframes self-check-spin { to { transform: rotate(360deg); } }
 @keyframes self-check-pulse { 0%, 100% { opacity: .25; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
+.fatal-overlay { position: fixed; inset: 0; z-index: 1100; display: grid; place-items: center; padding: 20px; background: rgba(2, 8, 16, .82); backdrop-filter: blur(8px); }
+.fatal-modal { width: min(480px, 100%); padding: 24px; border: 1px solid rgba(255, 122, 143, .35); border-radius: 18px; background: #1c0f14; box-shadow: 0 24px 80px rgba(0, 0, 0, .5); }
+.fatal-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.fatal-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: rgba(255, 122, 143, .18); color: #ff9aaa; font-weight: 800; }
+.fatal-heading h2 { font-size: 20px; }
+.fatal-message { padding: 12px 14px; border-radius: 10px; background: rgba(0, 0, 0, .3); color: #ffb8c4; font: 12px/1.5 ui-monospace, monospace; word-break: break-word; }
+.fatal-hint { margin-top: 12px; color: #a48b90; font-size: 12px; }
+.fatal-actions { display: flex; justify-content: flex-end; margin-top: 20px; }
+.fatal-actions button { padding: 9px 16px; border: 0; border-radius: 8px; cursor: pointer; font-weight: 600; }
+.fatal-actions .primary { color: #06101a; background: #64d6f4; }
 .header {
   max-width: 1560px;
   margin: 0 auto;
@@ -325,10 +364,10 @@ body {
 .eyebrow { color: #78a9c6; font-size: 10px; font-weight: 700; letter-spacing: 1.4px; }
 .header h1 { font-size: 20px; letter-spacing: -0.3px; margin-top: 2px; }
 .main {
-  max-width: 1560px;
+  max-width: 1800px;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: minmax(290px, 340px) minmax(380px, 1fr) minmax(280px, 320px);
+  grid-template-columns: minmax(280px, 320px) minmax(700px, 1fr) minmax(250px, 290px);
   grid-template-areas: "control visuals rail";
   gap: 18px;
   padding: 24px 28px 20px;

@@ -42,7 +42,11 @@ export function useLeaderSerial(
     }
   }
 
-  async function nextPacket(expectedId: number, minimumParams: number, timeoutMs = 250): Promise<number[]> {
+  /**
+   * 读取下一个校验和有效的完整状态包（不限定来源电机 ID）。
+   * SYNC_READ 广播后，各电机按 ID 顺序背靠背回应，需要逐包收齐而不是逐个单独请求再等待。
+   */
+  async function nextStatusPacket(minimumParams: number, timeoutMs: number): Promise<number[]> {
     const deadline = performance.now() + timeoutMs;
     while (performance.now() < deadline) {
       while (buffer.length >= 4) {
@@ -54,33 +58,46 @@ export function useLeaderSerial(
         const value = buffer.splice(0, total);
         const checksum = (~value.slice(2, -1).reduce((sum, byte) => sum + byte, 0)) & 0xff;
         if (value[value.length - 1] !== checksum) continue;
-        // 关闭扭矩等写命令可能留下 ACK；只接收当前读取请求的完整响应。
-        if (value[2] !== expectedId || value[3] < minimumParams + 2) continue;
+        if (value[3] < minimumParams + 2) continue;
         return value;
       }
       if (readFailure) throw readFailure;
       if (!reader) throw new Error("串口已关闭");
-      await delay(2);
+      await delay(1);
     }
     throw new Error("读取超时");
   }
 
-  async function readPosition(id: number): Promise<number> {
+  /**
+   * 一次 SYNC_READ (0x82) 广播读取全部电机的 Present_Position，
+   * 取代逐电机单独 READ；把每轮 6 次串行 USB 往返合并为 1 次广播 + 背靠背应答。
+   */
+  async function syncReadPositions(ids: number[]): Promise<Map<number, number>> {
     if (!writer) throw new Error("串口尚未连接");
     let lastError = "读取超时";
     for (let attempt = 1; attempt <= 3; attempt += 1) {
-      await writer.write(packet(id, 0x02, [56, 2]));
+      await writer.write(packet(0xfe, 0x82, [56, 2, ...ids]));
+      const results = new Map<number, number>();
       try {
-        const response = await nextPacket(id, 2);
-        if (response[4] !== 0) throw new Error(`返回错误码 ${response[4]}`);
-        return response[5] | (response[6] << 8);
+        const deadline = performance.now() + 150;
+        while (results.size < ids.length) {
+          const remaining = deadline - performance.now();
+          if (remaining <= 0) break;
+          const response = await nextStatusPacket(2, remaining);
+          const id = response[2];
+          if (!ids.includes(id) || results.has(id) || response[4] !== 0) continue;
+          results.set(id, response[5] | (response[6] << 8));
+        }
+        if (results.size === ids.length) return results;
+        lastError = `仅收到 ${results.size}/${ids.length} 个电机响应`;
       } catch (cause) {
         lastError = cause instanceof Error ? cause.message : String(cause);
-        if (readFailure || !active) break;
-        await delay(20);
       }
+      if (readFailure || !active) break;
+      buffer = [];
+      await delay(20);
     }
-    throw new Error(`电机 ${id} ${lastError}（已重试 3 次）`);
+    throw new Error(`SYNC_READ ${lastError}（已重试 3 次）`);
   }
 
   async function disableLeaderTorque() {
@@ -134,12 +151,14 @@ export function useLeaderSerial(
       throw cause;
     }
 
+    const motorIds = names.map((name) => calibration[name].id);
     const interval = Math.max(16, Math.round(1000 / Math.min(60, Math.max(1, fps))));
     const poll = async () => {
       if (!active) return;
       try {
+        const raw = await syncReadPositions(motorIds);
         const values = {} as JointData;
-        for (const name of names) values[name] = normalize(await readPosition(calibration[name].id), name, calibration[name]);
+        for (const name of names) values[name] = normalize(raw.get(calibration[name].id)!, name, calibration[name]);
         joints.value = values;
         send({ type: "action", joints: values, ts_ms: Date.now() });
         if (consecutivePollFailures > 0) {
@@ -151,7 +170,7 @@ export function useLeaderSerial(
         // 用户主动停止会取消正在等待的串口读取，不应记录为设备故障。
         if (!active) return;
         const message = cause instanceof Error ? cause.message : String(cause);
-        if (!readFailure && message.includes("读取超时")) {
+        if (!readFailure && message.includes("SYNC_READ")) {
           consecutivePollFailures += 1;
           error.value = `${message}；正在自动恢复 (${consecutivePollFailures}/5)`;
           if (consecutivePollFailures === 1) log(`Leader 串口瞬时丢包: ${error.value}`);

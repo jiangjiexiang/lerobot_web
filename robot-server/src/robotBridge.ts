@@ -19,6 +19,7 @@ export class RobotBridge extends EventEmitter {
   private bridgePath: string;
   private args: string[];
   private pythonPath: string;
+  private stderrTail: string[] = [];
 
   constructor(bridgePath: string, args: string[], pythonPath: string = "python3") {
     super();
@@ -63,12 +64,16 @@ export class RobotBridge extends EventEmitter {
     });
 
     this.process.stderr?.on("data", (data: Buffer) => {
-      console.log(`[Python stderr] ${data.toString().trim()}`);
+      const text = data.toString();
+      console.log(`[Python stderr] ${text.trim()}`);
+      // 保留最后若干行，用于进程异常退出时向前端展示 Python 报错原因（如 Traceback 的最后一行）。
+      this.stderrTail.push(...text.split("\n").filter((line) => line.trim()));
+      if (this.stderrTail.length > 20) this.stderrTail = this.stderrTail.slice(-20);
     });
 
     this.process.on("exit", (code) => {
       console.log(`[RobotBridge] Python 进程退出, code=${code}`);
-      this.emit("exit", code);
+      this.emit("exit", code, code && code !== 0 ? this.lastErrorLine() : null);
     });
 
     this.process.on("error", (err) => {
@@ -108,5 +113,13 @@ export class RobotBridge extends EventEmitter {
 
   isRunning(): boolean {
     return this.process !== null && this.process.exitCode === null;
+  }
+
+  // Python Traceback 的最后一行通常是 "XxxError: 具体原因"，优先取这一行；
+  // 找不到则退化为 stderr 最后一行非空文本。
+  private lastErrorLine(): string | null {
+    const errorLine = [...this.stderrTail].reverse().find((line) => /Error[:\s]/.test(line));
+    if (errorLine) return errorLine.trim();
+    return this.stderrTail.length > 0 ? this.stderrTail[this.stderrTail.length - 1].trim() : null;
   }
 }
