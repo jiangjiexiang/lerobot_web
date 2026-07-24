@@ -48,5 +48,5 @@ echo ""
 
 export HTTPS_CERT="$CERT_DIR/lerobot-lan.crt"
 export HTTPS_KEY="$CERT_DIR/lerobot-lan.key"
-export PORT="${PORT:-4000}"
+export PORT="${PORT:-43127}"
 exec "$ROOT_DIR/start_robot.sh"

@@ -18,7 +18,7 @@ export class RemoteClient extends EventEmitter {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectInterval = 3000;
 
-  constructor(remoteHost: string, remotePort: number = 4000) {
+  constructor(remoteHost: string, remotePort: number = 43127) {
     super();
     this.url = `ws://${remoteHost}:${remotePort}/ws`;
   }

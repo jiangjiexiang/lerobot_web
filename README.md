@@ -68,10 +68,9 @@ HTTPS_KEY="$PWD/.certs/lerobot-lan.key" \
 | 服务 | 地址 |
 | --- | --- |
 | 网页开发服务器 | `http://localhost:5173` |
-| Robot API | `http://localhost:3000` |
-| WebSocket | `ws://localhost:3000/ws` |
-| MuJoCo MJPEG | `http://localhost:3000/video/mujoco` |
-| 健康检查 | `http://localhost:3000/health` |
+| Robot API | `http://localhost:43127` |
+| WebSocket | `ws://localhost:43127/ws/control` |
+| 健康检查 | `http://localhost:43127/health` |
 
 ## 常用操作
 

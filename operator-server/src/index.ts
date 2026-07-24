@@ -9,7 +9,7 @@ import { RemoteClient, RemoteMessage } from "./remoteClient";
 // 配置
 const PORT = parseInt(process.env.PORT || "3001");
 const REMOTE_HOST = process.env.REMOTE_HOST || "localhost";
-const REMOTE_PORT = parseInt(process.env.REMOTE_PORT || "4000");
+const REMOTE_PORT = parseInt(process.env.REMOTE_PORT || "43127");
 const BRIDGE_PATH = process.env.BRIDGE_PATH || path.join(__dirname, "../../bridge/leader_bridge.py");
 const LEADER_PORT = process.env.LEADER_PORT || "/dev/ttyACM1";
 const LEADER_ID = process.env.LEADER_ID || "";

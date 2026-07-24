@@ -11,7 +11,7 @@ export LEADER_ID="${LEADER_ID:-R07253102}"
 export FPS="${FPS:-30}"
 export PORT="${PORT:-3001}"
 export REMOTE_HOST="${REMOTE_HOST:-localhost}"
-export REMOTE_PORT="${REMOTE_PORT:-4000}"
+export REMOTE_PORT="${REMOTE_PORT:-43127}"
 
 echo "=== 操作电脑启动 ==="
 echo "Python: $PYTHON_PATH"

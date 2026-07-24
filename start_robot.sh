@@ -6,7 +6,7 @@ set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHON_PATH="${PYTHON_PATH:-python3}"
-export PORT="${PORT:-4000}"
+export PORT="${PORT:-43127}"
 export ENABLE_CAMERA="${ENABLE_CAMERA:-1}"
 export CAMERA_FPS="${CAMERA_FPS:-15}"
 export STREAM_FPS="${STREAM_FPS:-0}"

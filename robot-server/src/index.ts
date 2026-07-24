@@ -9,7 +9,7 @@ import { RobotBridge, BridgeMessage } from "./robotBridge";
 import { MJPEGStreamManager } from "./streams";
 
 // 配置
-const PORT = parseInt(process.env.PORT || "4000");
+const PORT = parseInt(process.env.PORT || "43127");
 const BRIDGE_DIR = process.env.BRIDGE_DIR || path.join(__dirname, "../../bridge");
 const TELEOP_SCRIPT = path.join(BRIDGE_DIR, "teleop_mujoco.py");
 const CAMERA_SCRIPT = path.join(BRIDGE_DIR, "camera_stream.py");
