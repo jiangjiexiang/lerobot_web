@@ -9,7 +9,7 @@ import { RobotBridge, BridgeMessage } from "./robotBridge";
 import { MJPEGStreamManager } from "./streams";
 
 // 配置
-const PORT = parseInt(process.env.PORT || "3000");
+const PORT = parseInt(process.env.PORT || "4000");
 const BRIDGE_DIR = process.env.BRIDGE_DIR || path.join(__dirname, "../../bridge");
 const TELEOP_SCRIPT = path.join(BRIDGE_DIR, "teleop_mujoco.py");
 const CAMERA_SCRIPT = path.join(BRIDGE_DIR, "camera_stream.py");
@@ -50,7 +50,22 @@ app.use(cors());
 app.use(express.json());
 
 const server = createServer(app);
-const wss = new WebSocketServer({ server, path: "/ws" });
+// 控制和视频必须使用不同连接；视频拥塞时不能阻塞 30/60Hz 控制链路。
+const controlWss = new WebSocketServer({ noServer: true });
+const streamWss = new WebSocketServer({ noServer: true });
+
+// 显式路由 WebSocket Upgrade，避免多个 WebSocketServer 监听同一 HTTP Server
+// 时请求被错误当成普通 HTTP/SPA 请求，导致浏览器出现 Invalid frame header。
+server.on("upgrade", (request, socket, head) => {
+  const pathname = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`).pathname;
+  if (pathname === "/ws/control") {
+    controlWss.handleUpgrade(request, socket, head, (ws) => controlWss.emit("connection", ws, request));
+  } else if (pathname === "/ws/stream") {
+    streamWss.handleUpgrade(request, socket, head, (ws) => streamWss.emit("connection", ws, request));
+  } else {
+    socket.destroy();
+  }
+});
 
 const streamManager = new MJPEGStreamManager();
 
@@ -60,6 +75,7 @@ let stopping = false;
 let remoteLeaderActive = false;
 let latestObservation: BridgeMessage | null = null;
 const clients = new Set<WebSocket>();
+const streamClients = new Set<WebSocket>();
 
 // 摄像头是可选资源：默认关闭，避免服务启动时常驻 OpenCV 进程并占用 USB 摄像头。
 let cameraBridge: RobotBridge | null = null;
@@ -72,7 +88,7 @@ function startCamera(index: number): void {
   cameraBridge.on("message", (msg: BridgeMessage) => {
     if (msg.type === "camera_frame" && msg.data) {
       streamManager.updateFrameFromBase64("camera", msg.data);
-      broadcast(msg);
+      broadcastStream(msg);
     } else if (msg.type === "camera_error") console.error(`[Camera] ${String(msg.error || "摄像头不可用")}`);
   });
   cameraBridge.start();
@@ -90,7 +106,7 @@ function startCamera2(index: number): void {
   cameraBridge2.on("message", (msg: BridgeMessage) => {
     if (msg.type === "camera_frame" && msg.data) {
       streamManager.updateFrameFromBase64("camera2", msg.data);
-      broadcast({ type: "camera2_frame", data: msg.data, ts: msg.ts });
+      broadcastStream({ type: "camera2_frame", data: msg.data, ts: msg.ts });
     } else if (msg.type === "camera_error") console.error(`[Camera2] ${String(msg.error || "摄像头不可用")}`);
   });
   cameraBridge2.start();
@@ -214,21 +230,13 @@ app.post("/api/start", (req, res) => {
     switch (msg.type) {
       case "teleop_observation":
         latestObservation = msg;
-        broadcast(msg);
-        break;
-
-      case "mujoco_frame":
-        if (msg.data) {
-          streamManager.updateFrameFromBase64("mujoco", msg.data);
-          // 网页端通过 WebSocket 接收实时帧；MJPEG 端点则供外部客户端使用。
-          broadcast(msg);
-        }
+        broadcastControl(msg);
         break;
 
       case "camera_frame":
         if (msg.data) {
           streamManager.updateFrameFromBase64("camera", msg.data);
-          broadcast(msg);
+          broadcastStream(msg);
         }
         break;
 
@@ -244,7 +252,7 @@ app.post("/api/start", (req, res) => {
       bridge = null;
       stopping = false;
       remoteLeaderActive = false;
-      broadcast({ type: "stopped" });
+      broadcastControl({ type: "stopped" });
     }
   });
 
@@ -253,7 +261,7 @@ app.post("/api/start", (req, res) => {
   });
 
   startedBridge.start();
-  broadcast({ type: "status", running: true });
+  broadcastControl({ type: "status", running: true });
   res.json({ ok: true, msg: "遥操作已启动" });
 });
 
@@ -267,7 +275,7 @@ app.post("/api/stop", (req, res) => {
   stopping = true;
   activeBridge.stop();
   // 不等待 Python 清理完成才更新界面，避免停止按钮看起来没有反应。
-  broadcast({ type: "status", running: false });
+  broadcastControl({ type: "status", running: false });
   res.json({ ok: true });
 });
 
@@ -299,10 +307,6 @@ app.post("/api/camera/switch", (req, res) => {
 });
 
 // MJPEG 流端点
-app.get("/video/mujoco", (req, res) => {
-  streamManager.handleStream("mujoco", req, res);
-});
-
 app.get("/video/camera", (req, res) => {
   streamManager.handleStream("camera", req, res);
 });
@@ -333,15 +337,15 @@ app.use((req, res) => {
     res.json({
       status: "ok",
       message: "前端未构建，开发模式请访问 http://localhost:5173",
-      api: ["/api/ports", "/api/start", "/api/stop", "/api/status", "/health", "/ws"],
+      api: ["/api/ports", "/api/start", "/api/stop", "/api/status", "/health", "/ws/control", "/ws/stream"],
     });
   }
 });
 
 // ===================== WebSocket =====================
 
-wss.on("connection", (ws) => {
-  console.log("[Server] 新客户端连接");
+controlWss.on("connection", (ws) => {
+  console.log("[Server] 新控制客户端连接");
   clients.add(ws);
 
   // 发送当前状态
@@ -364,19 +368,32 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
-    console.log("[Server] 客户端断开");
+    console.log("[Server] 控制客户端断开");
     clients.delete(ws);
   });
 });
 
-function broadcast(msg: BridgeMessage): void {
+streamWss.on("connection", (ws) => {
+  console.log("[Server] 新推流客户端连接");
+  streamClients.add(ws);
+  ws.on("close", () => streamClients.delete(ws));
+});
+
+function broadcastControl(msg: BridgeMessage | object): void {
   const data = JSON.stringify(msg);
-  const isVideoFrame = msg.type === "mujoco_frame" || msg.type === "camera_frame" || msg.type === "camera2_frame";
   for (const client of clients) {
     if (client.readyState === WebSocket.OPEN) {
-      // 视频是最新帧优先的数据。客户端网络落后时丢弃本帧，避免 WebSocket
-      // 队列越来越长，从而间接拖慢同一连接上的遥操作动作。
-      if (isVideoFrame && client.bufferedAmount > 512 * 1024) continue;
+      client.send(data);
+    }
+  }
+}
+
+function broadcastStream(msg: BridgeMessage | object): void {
+  const data = JSON.stringify(msg);
+  for (const client of streamClients) {
+    if (client.readyState === WebSocket.OPEN) {
+      // 推流只保留最新帧；慢客户端直接丢弃，绝不形成积压。
+      if (client.bufferedAmount > 512 * 1024) continue;
       client.send(data);
     }
   }
@@ -386,8 +403,8 @@ function broadcast(msg: BridgeMessage): void {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`[Robot Server] 监听在 http://0.0.0.0:${PORT}`);
-  console.log(`[Robot Server] WebSocket: ws://0.0.0.0:${PORT}/ws`);
-  console.log(`[Robot Server] MuJoCo流: http://0.0.0.0:${PORT}/video/mujoco`);
+  console.log(`[Robot Server] 控制 WebSocket: ws://0.0.0.0:${PORT}/ws/control`);
+  console.log(`[Robot Server] 推流 WebSocket: ws://0.0.0.0:${PORT}/ws/stream`);
   console.log(`[Robot Server] 摄像头1: http://0.0.0.0:${PORT}/video/camera`);
   console.log(`[Robot Server] 摄像头2: http://0.0.0.0:${PORT}/video/camera2`);
   console.log(`[Robot Server] API: /api/ports /api/start /api/stop /api/status`);

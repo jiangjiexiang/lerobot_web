@@ -21,8 +21,6 @@ import threading
 import time
 
 import cv2
-import mujoco
-import mujoco.viewer
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../lerobot/src"))
@@ -320,22 +318,9 @@ def main():
     if use_raw:
         logger.warning("无标定文件，使用原始编码器值 (0-4095)，MuJoCo 将按原始值映射弧度")
 
-    # === 初始化 MuJoCo ===
-    follower_calib = follower_bus.calibration
-    sim = MuJoCoSim(MODEL_PATH, calibration=follower_calib)
-    logger.info(f"MuJoCo 仿真初始化成功: {MODEL_PATH}")
-
-    # 加载 home 关键帧
-    if sim.model.nkey > 0:
-        mujoco.mj_resetDataKeyframe(sim.model, sim.data, 0)
-        mujoco.mj_forward(sim.model, sim.data)
-        logger.info("已加载 home 关键帧")
-
     period = 1.0 / args.fps
-    stream_period = 1.0 / max(1, args.stream_fps)
-    next_stream_frame = 0.0
     frame_count = 0
-    logger.info(f"控制 {args.fps} FPS | 网页 MuJoCo 流 {args.stream_fps} FPS | JPEG 质量 {args.stream_jpeg_quality}")
+    logger.info(f"控制 {args.fps} FPS | MuJoCo 已关闭")
     camera = CameraCapture(args.camera_index) if args.camera_index >= 0 else None
     if camera and camera.available:
         logger.info(f"摄像头 {args.camera_index} 初始化成功（最大 {args.camera_fps} FPS）")
@@ -350,28 +335,13 @@ def main():
         if jpeg:
             print(json.dumps({"type": "camera_frame", "data": base64.b64encode(jpeg).decode("ascii"), "ts": time.time()}), flush=True)
 
-    def emit_mujoco_frame():
-        """画面是可丢弃数据；绝不能让其编码速度拖慢关节控制。"""
-        nonlocal next_stream_frame
-        if args.stream_fps <= 0:
-            return
-        now = time.monotonic()
-        if now < next_stream_frame:
-            return
-        next_stream_frame = now + stream_period
-        mujoco_jpeg = sim.render(args.stream_jpeg_quality)
-        print(json.dumps({
-            "type": "mujoco_frame",
-            "data": base64.b64encode(mujoco_jpeg).decode("ascii"),
-            "ts": time.time(),
-        }), flush=True)
-
     def get_leader_joints() -> dict:
         if remote_leader:
             return remote_leader.latest(args.command_timeout) or {}
         return read_positions(leader_bus, normalize=not use_raw)
 
-    if args.viewer:
+    # MuJoCo 已永久关闭；保留旧参数仅为兼容已有启动配置。
+    if False:
         # === 交互式查看器模式 ===
         logger.info("启动 MuJoCo 交互式查看器...")
         logger.info("按 ESC 或关闭窗口退出")
@@ -398,9 +368,6 @@ def main():
                 follower_joints = read_positions(follower_bus, normalize=not use_raw)
 
                 # 4. 更新 MuJoCo
-                sim.update_joints(follower_joints, raw=use_raw)
-                sim.step()
-
                 # 5. 同步查看器
                 viewer.sync()
 
@@ -414,7 +381,6 @@ def main():
                 print(json.dumps(msg), flush=True)
 
                 # 同时输出网页所需的离屏帧。这样开启原生查看器时，浏览器也能显示仿真画面。
-                emit_mujoco_frame()
                 emit_camera_frame()
 
                 # 等待
@@ -446,9 +412,6 @@ def main():
                 follower_joints = read_positions(follower_bus, normalize=not use_raw)
 
                 # 4. 更新 MuJoCo + 渲染
-                sim.update_joints(follower_joints, raw=use_raw)
-                sim.step()
-
                 # 5. 输出 JSON
                 obs_msg = {
                     "type": "teleop_observation",
@@ -459,7 +422,6 @@ def main():
                 print(json.dumps(obs_msg), flush=True)
 
                 # 6. 输出 MuJoCo 帧
-                emit_mujoco_frame()
                 emit_camera_frame()
 
                 # 等待

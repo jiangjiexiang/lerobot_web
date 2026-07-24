@@ -4,6 +4,8 @@ import fs from "node:fs";
 
 const certPath = process.env.HTTPS_CERT;
 const keyPath = process.env.HTTPS_KEY;
+// 与 start_robot.sh / start_wifi_robot.sh 共享后端端口，避免代理指向旧的固定端口。
+const backendPort = process.env.PORT || "4000";
 const https = certPath && keyPath && fs.existsSync(certPath) && fs.existsSync(keyPath)
   ? { cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) }
   : undefined;
@@ -15,10 +17,10 @@ export default defineConfig({
     port: 5173,
     https,
     proxy: {
-      "/api": "http://localhost:3005",
-      "/video": "http://localhost:3005",
+      "/api": `http://localhost:${backendPort}`,
+      "/video": `http://localhost:${backendPort}`,
       "/ws": {
-        target: "ws://localhost:3005",
+        target: `ws://localhost:${backendPort}`,
         ws: true,
       },
     },

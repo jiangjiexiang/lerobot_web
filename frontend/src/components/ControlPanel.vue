@@ -68,13 +68,6 @@
           <option :value="60">60</option>
         </select>
       </div>
-      <div class="form-group">
-        <label>本地 MuJoCo</label>
-        <select v-model="viewerVal">
-          <option :value="false">仅网页画面</option>
-          <option :value="true">同时打开弹窗</option>
-        </select>
-      </div>
     </div>
 
     <template v-if="local.remoteLeader">
@@ -85,14 +78,14 @@
       <p v-if="serialError" class="serial-error">{{ serialError }}</p>
     </template>
 
-    <button class="btn btn-start" :disabled="running || busy || (local.remoteLeader && !serialConnected)" @click="$emit('start', { ...local, viewer: viewerVal })">
+    <button class="btn btn-start" :disabled="running || busy || (local.remoteLeader && !serialConnected)" @click="$emit('start', { ...local, viewer: false })">
       {{ busy && !running ? "正在启动…" : running ? "遥操作运行中" : "启动遥操作" }}
     </button>
     <button class="btn btn-stop" :disabled="!running || busy" @click="$emit('stop')">
       {{ busy && running ? "正在停止…" : "停止遥操作" }}
     </button>
 
-    <p class="hint">网页仿真画面始终显示；可选同时打开本机 MuJoCo 窗口。</p>
+    <p class="hint">MuJoCo 仿真已关闭，仅运行真实机器人控制和摄像头。</p>
   </div>
 </template>
 
@@ -129,7 +122,6 @@ const local = reactive({
   remoteLeader: false,
 });
 
-const viewerVal = ref(false);
 
 // 当端口列表变化时，设置默认值
 import { watch } from "vue";

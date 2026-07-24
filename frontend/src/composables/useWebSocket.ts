@@ -24,13 +24,15 @@ export function useWebSocket() {
   const running = ref(false);
   const leaderJoints = ref<JointData | null>(null);
   const followerJoints = ref<JointData | null>(null);
-  const mujocoFrame = ref<string | null>(null);
   const cameraFrame = ref<string | null>(null);
   const camera2Frame = ref<string | null>(null);
   const logs = ref<string[]>([]);
 
   let ws: WebSocket | null = null;
+  let streamWs: WebSocket | null = null;
   let reconnectTimer: number | null = null;
+  let streamReconnectTimer: number | null = null;
+  let disposed = false;
 
   function log(msg: string) {
     const t = new Date().toLocaleTimeString();
@@ -39,10 +41,12 @@ export function useWebSocket() {
   }
 
   function connect() {
+    if (disposed || (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN))) return;
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${proto}://${location.host}/ws`);
+    ws = new WebSocket(`${proto}://${location.host}/ws/control`);
 
     ws.onopen = () => {
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       connected.value = true;
       log("WebSocket 已连接");
     };
@@ -51,7 +55,7 @@ export function useWebSocket() {
       connected.value = false;
       running.value = false;
       log("WebSocket 断开，3秒后重连...");
-      reconnectTimer = window.setTimeout(connect, 3000);
+      if (!disposed) reconnectTimer = window.setTimeout(connect, 3000);
     };
 
     ws.onerror = () => log("WebSocket 错误");
@@ -63,6 +67,18 @@ export function useWebSocket() {
       } catch {
         // 忽略非 JSON
       }
+    };
+  }
+
+  function connectStream() {
+    if (disposed || (streamWs && (streamWs.readyState === WebSocket.CONNECTING || streamWs.readyState === WebSocket.OPEN))) return;
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    streamWs = new WebSocket(`${proto}://${location.host}/ws/stream`);
+    streamWs.onmessage = (ev) => {
+      try { handleMessage(JSON.parse(ev.data)); } catch { /* ignore malformed frame */ }
+    };
+    streamWs.onclose = () => {
+      if (!disposed) streamReconnectTimer = window.setTimeout(connectStream, 3000);
     };
   }
 
@@ -79,9 +95,6 @@ export function useWebSocket() {
         if (msg.leader) leaderJoints.value = msg.leader;
         if (msg.follower) followerJoints.value = msg.follower;
         break;
-      case "mujoco_frame":
-        if (msg.data) mujocoFrame.value = msg.data;
-        break;
       case "camera_frame":
         if (msg.data) cameraFrame.value = msg.data;
         break;
@@ -97,10 +110,13 @@ export function useWebSocket() {
     }
   }
 
-  onMounted(() => connect());
+  onMounted(() => { connect(); connectStream(); });
   onUnmounted(() => {
+    disposed = true;
     if (reconnectTimer) clearTimeout(reconnectTimer);
+    if (streamReconnectTimer) clearTimeout(streamReconnectTimer);
     if (ws) ws.close();
+    if (streamWs) streamWs.close();
   });
 
   return {
@@ -108,7 +124,6 @@ export function useWebSocket() {
     running,
     leaderJoints,
     followerJoints,
-    mujocoFrame,
     cameraFrame,
     camera2Frame,
     logs,

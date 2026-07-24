@@ -6,7 +6,7 @@ set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHON_PATH="${PYTHON_PATH:-python3}"
-export PORT="${PORT:-3000}"
+export PORT="${PORT:-4000}"
 export ENABLE_CAMERA="${ENABLE_CAMERA:-1}"
 export CAMERA_FPS="${CAMERA_FPS:-15}"
 export STREAM_FPS="${STREAM_FPS:-0}"
@@ -28,10 +28,20 @@ else
 fi
 echo ""
 
-# 检查 Python
-if [ ! -f "$PYTHON_PATH" ]; then
-    echo "错误: Python 路径不存在: $PYTHON_PATH"
-    exit 1
+# 检查 Python：PYTHON_PATH 既可以是绝对/相对文件路径，也可以是 PATH 中的命令名（如 python3）。
+if [[ "$PYTHON_PATH" == */* ]]; then
+    if [ ! -f "$PYTHON_PATH" ] || [ ! -x "$PYTHON_PATH" ]; then
+        echo "错误: Python 可执行文件不存在或不可执行: $PYTHON_PATH"
+        exit 1
+    fi
+else
+    if ! command -v "$PYTHON_PATH" >/dev/null 2>&1; then
+        echo "错误: PATH 中找不到 Python 命令: $PYTHON_PATH"
+        echo "当前 PATH: $PATH"
+        exit 1
+    fi
+    PYTHON_PATH="$(command -v "$PYTHON_PATH")"
+    export PYTHON_PATH
 fi
 
 # 检查 Node.js 版本
