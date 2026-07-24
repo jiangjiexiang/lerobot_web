@@ -5,7 +5,7 @@
 set -e
 
 # 配置
-export PYTHON_PATH="${PYTHON_PATH:-/home/nvidia/miniconda3/envs/lerobot/bin/python}"
+export PYTHON_PATH="${PYTHON_PATH:-python3}"
 export LEADER_PORT="${LEADER_PORT:-/dev/ttyACM1}"
 export LEADER_ID="${LEADER_ID:-R07253102}"
 export FPS="${FPS:-30}"

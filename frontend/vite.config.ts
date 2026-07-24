@@ -15,10 +15,10 @@ export default defineConfig({
     port: 5173,
     https,
     proxy: {
-      "/api": "http://localhost:3001",
-      "/video": "http://localhost:3001",
+      "/api": "http://localhost:3005",
+      "/video": "http://localhost:3005",
       "/ws": {
-        target: "ws://localhost:3001",
+        target: "ws://localhost:3005",
         ws: true,
       },
     },

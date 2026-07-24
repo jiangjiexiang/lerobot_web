@@ -42,12 +42,21 @@
       <input v-model="local.leaderId" placeholder="如 R07253102" />
     </div>
 
-    <div class="form-group">
-      <label>摄像头</label>
-      <select v-model.number="local.cameraIndex">
-        <option v-for="camera in cameras" :key="camera.index" :value="camera.index">{{ camera.path }}</option>
-        <option v-if="!cameras.length" :value="0">/dev/video0（未检测到，仍尝试启动）</option>
-      </select>
+    <div class="row2">
+      <div class="form-group">
+        <label>摄像头 1 <span>左侧画面</span></label>
+        <select v-model.number="local.cameraIndex" @change="$emit('switchCamera', { view: 'camera', index: local.cameraIndex })">
+          <option v-for="c in detectedCameras" :key="c" :value="c" :disabled="c === local.camera2Index">/dev/video{{ c }} {{ c === activeCameras.camera ? '✓ 当前' : '' }}</option>
+          <option v-if="!detectedCameras.length" disabled>未检测到摄像头</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>摄像头 2 <span>右侧画面</span></label>
+        <select v-model.number="local.camera2Index" @change="$emit('switchCamera', { view: 'camera2', index: local.camera2Index })">
+          <option v-for="c in detectedCameras" :key="c" :value="c" :disabled="c === local.cameraIndex">/dev/video{{ c }} {{ c === activeCameras.camera2 ? '✓ 当前' : '' }}</option>
+          <option v-if="!detectedCameras.length" disabled>未检测到摄像头</option>
+        </select>
+      </div>
     </div>
 
     <div class="row2">
@@ -92,7 +101,8 @@ import { reactive, ref } from "vue";
 
 const props = defineProps<{
   ports: string[];
-  cameras: { index: number; path: string }[];
+  detectedCameras: number[];
+  activeCameras: { camera: number; camera2: number };
   running: boolean;
   busy: boolean;
   serialConnected: boolean;
@@ -103,6 +113,7 @@ const emit = defineEmits<{
   start: [config: Record<string, unknown>];
   stop: [];
   refresh: [];
+  switchCamera: [config: { view: string; index: number }];
   connectLeader: [config: { leaderId: string; fps: number }];
   disconnectLeader: [];
 }>();
@@ -113,6 +124,7 @@ const local = reactive({
   leaderPort: "",
   leaderId: "R07253102",
   cameraIndex: 0,
+  camera2Index: 0,
   fps: 60,
   remoteLeader: false,
 });
@@ -128,6 +140,25 @@ watch(
     if (ports.length >= 2 && !local.leaderPort) local.leaderPort = ports[1];
   },
   { immediate: true }
+);
+// 设置默认摄像头
+watch(
+  () => props.detectedCameras,
+  (cameras) => {
+    if (cameras.length >= 1 && !local.cameraIndex) local.cameraIndex = cameras[0];
+    if (cameras.length >= 2 && !local.camera2Index) local.camera2Index = cameras[1];
+    else if (cameras.length >= 1 && !local.camera2Index) local.camera2Index = cameras[0];
+  },
+  { immediate: true }
+);
+// 同步当前激活的摄像头索引
+watch(
+  () => props.activeCameras,
+  (ac) => {
+    if (ac.camera >= 0) local.cameraIndex = ac.camera;
+    if (ac.camera2 >= 0) local.camera2Index = ac.camera2;
+  },
+  { deep: true }
 );
 </script>
 

@@ -15,7 +15,8 @@
       <section class="panel ctrl" aria-label="遥操作配置">
         <ControlPanel
           :ports="ports"
-          :cameras="cameras"
+          :detected-cameras="detectedCameras"
+          :active-cameras="activeCameras"
           :running="running"
           :busy="actionPending"
           :serial-connected="serialConnected"
@@ -23,19 +24,20 @@
           @refresh="fetchPorts"
           @start="handleStart"
           @stop="handleStop"
+          @switch-camera="handleSwitchCamera"
           @connect-leader="handleConnectLeader"
           @disconnect-leader="disconnectLeader"
         />
       </section>
 
       <section class="visuals" aria-label="机器人可视化">
-        <section class="panel view" aria-label="MuJoCo 仿真画面"><MuJoCoView :frame="mujocoFrame" /></section>
-        <section class="panel camera" aria-label="机器人摄像头画面"><CameraView :frame="cameraFrame" /></section>
+        <section class="panel view" aria-label="摄像头 1 画面"><MuJoCoView :frame="cameraFrame" kicker="实时画面" title="摄像头 1 (左侧)" placeholder="等待摄像头 1 画面…" hint="USB 摄像头 1 画面" liveText="LIVE" waitText="READY" /></section>
+        <section class="panel view" aria-label="摄像头 2 画面"><MuJoCoView :frame="camera2Frame" kicker="实时画面" title="摄像头 2 (右侧)" placeholder="等待摄像头 2 画面…" hint="USB 摄像头 2 画面" liveText="LIVE" waitText="READY" /></section>
+        <section class="console" aria-label="运行控制台"><LogPanel :logs="logs" /></section>
       </section>
 
-      <aside class="right-rail" aria-label="实时状态与日志">
+      <aside class="right-rail" aria-label="实时状态">
         <section class="panel joints" aria-label="实时关节数据"><JointPanel :leader="leaderJoints" :follower="followerJoints" /></section>
-        <section class="panel logs" aria-label="运行日志"><LogPanel :logs="logs" /></section>
       </aside>
     </main>
   </div>
@@ -47,7 +49,6 @@ import { useWebSocket } from "./composables/useWebSocket";
 import StatusBar from "./components/StatusBar.vue";
 import ControlPanel from "./components/ControlPanel.vue";
 import MuJoCoView from "./components/MuJoCoView.vue";
-import CameraView from "./components/CameraView.vue";
 import JointPanel from "./components/JointPanel.vue";
 import LogPanel from "./components/LogPanel.vue";
 import { useLeaderSerial } from "./composables/useLeaderSerial";
@@ -57,8 +58,8 @@ const {
   running,
   leaderJoints,
   followerJoints,
-  mujocoFrame,
   cameraFrame,
+  camera2Frame,
   logs,
   log,
   send,
@@ -67,6 +68,8 @@ const { connected: serialConnected, error: serialError, connect: connectLeader, 
 
 const ports = ref<string[]>([]);
 const cameras = ref<{ index: number; path: string }[]>([]);
+const detectedCameras = ref<number[]>([]);
+const activeCameras = ref<{ camera: number; camera2: number }>({ camera: -1, camera2: -1 });
 const actionPending = ref(false);
 
 async function fetchPorts() {
@@ -76,9 +79,32 @@ async function fetchPorts() {
     ports.value = data.ports || [];
     log(`检测到 ${ports.value.length} 个串口`);
     const cameraRes = await fetch("/api/cameras");
-    cameras.value = (await cameraRes.json()).cameras || [];
+    const cd = await cameraRes.json();
+    cameras.value = cd.cameras || [];
+    detectedCameras.value = cd.detected || [];
+    if (cd.active) activeCameras.value = cd.active;
   } catch (e) {
     log("加载串口失败: " + e);
+  }
+}
+
+async function handleSwitchCamera(config: { view: string; index: number }) {
+  try {
+    const res = await fetch("/api/camera/switch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      const key = config.view === "camera" ? "camera" : "camera2";
+      activeCameras.value[key] = config.index;
+      log(`已切换 ${config.view === "camera" ? "摄像头 1" : "摄像头 2"} 到 /dev/video${config.index}`);
+    } else {
+      log(`切换摄像头失败: ${data.error}`);
+    }
+  } catch (e) {
+    log(`切换摄像头请求失败: ${e}`);
   }
 }
 
@@ -195,7 +221,7 @@ body {
   grid-template-columns: minmax(290px, 340px) minmax(380px, 1fr) minmax(280px, 320px);
   grid-template-areas: "control visuals rail";
   gap: 18px;
-  padding: 24px 28px 32px;
+  padding: 24px 28px 20px;
   align-items: start;
 }
 .panel {
@@ -206,13 +232,15 @@ body {
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.18);
 }
 .ctrl { grid-area: control; }
-.ctrl, .joints, .logs { align-self: start; }
-.view, .camera { width: 100%; }
-.visuals { grid-area: visuals; display: flex; flex-direction: column; gap: 18px; align-self: start; min-width: 0; }
+.ctrl, .joints { align-self: start; }
+.view { width: 100%; min-width: 0; }
+.visuals { grid-area: visuals; display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-self: start; min-width: 0; }
+.visuals .console { grid-column: 1 / -1; }
 .right-rail { grid-area: rail; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
 @media (max-width: 1100px) {
   .main { grid-template-columns: minmax(285px, 340px) minmax(430px, 1fr); grid-template-areas: "control visuals" "rail rail"; }
   .right-rail { display: grid; grid-template-columns: 1fr 1fr; }
+  .visuals { grid-template-columns: 1fr; }
 }
 @media (max-width: 760px) {
   .header, .main { padding-left: 16px; padding-right: 16px; }

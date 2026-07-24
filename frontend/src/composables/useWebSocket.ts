@@ -26,6 +26,7 @@ export function useWebSocket() {
   const followerJoints = ref<JointData | null>(null);
   const mujocoFrame = ref<string | null>(null);
   const cameraFrame = ref<string | null>(null);
+  const camera2Frame = ref<string | null>(null);
   const logs = ref<string[]>([]);
 
   let ws: WebSocket | null = null;
@@ -84,6 +85,9 @@ export function useWebSocket() {
       case "camera_frame":
         if (msg.data) cameraFrame.value = msg.data;
         break;
+      case "camera2_frame":
+        if (msg.data) camera2Frame.value = msg.data;
+        break;
     }
   }
 
@@ -106,6 +110,7 @@ export function useWebSocket() {
     followerJoints,
     mujocoFrame,
     cameraFrame,
+    camera2Frame,
     logs,
     log,
     send,

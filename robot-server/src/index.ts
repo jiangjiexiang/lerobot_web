@@ -4,7 +4,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import cors from "cors";
 import path from "path";
 import fs from "fs";
-import { execSync } from "child_process";
+import { execSync, exec } from "child_process";
 import { RobotBridge, BridgeMessage } from "./robotBridge";
 import { MJPEGStreamManager } from "./streams";
 
@@ -13,12 +13,37 @@ const PORT = parseInt(process.env.PORT || "3000");
 const BRIDGE_DIR = process.env.BRIDGE_DIR || path.join(__dirname, "../../bridge");
 const TELEOP_SCRIPT = path.join(BRIDGE_DIR, "teleop_mujoco.py");
 const CAMERA_SCRIPT = path.join(BRIDGE_DIR, "camera_stream.py");
-const PYTHON_PATH = process.env.PYTHON_PATH || "/home/nvidia/miniconda3/envs/lerobot/bin/python";
+const PYTHON_PATH = process.env.PYTHON_PATH || "python3";
 const FRONTEND_DIST = path.join(__dirname, "../../frontend/dist");
 const ENABLE_CAMERA = process.env.ENABLE_CAMERA !== "0" && process.env.ENABLE_CAMERA !== "false";
 const CAMERA_FPS = parseInt(process.env.CAMERA_FPS || "15", 10);
 const DEFAULT_STREAM_FPS = parseInt(process.env.STREAM_FPS || "0", 10);
-const DEFAULT_CAMERA_INDEX = parseInt(process.env.CAMERA_INDEX || "0", 10);
+
+function detectUsbCameraIndices(): number[] {
+  try {
+    const out = execSync("v4l2-ctl --list-devices 2>/dev/null", { encoding: "utf-8" });
+    const indices: number[] = [];
+    const blocks = out.split(/\n\n+/);
+    for (const block of blocks) {
+      const lines = block.trim().split("\n");
+      if (lines.length < 2) continue;
+      const name = lines[0].toLowerCase();
+      if (name.includes("tegra") || name.includes("vi-output")) continue;
+      // 每个 USB 摄像头设备块中有多个 video 节点，只取第一个
+      for (let i = 1; i < lines.length; i++) {
+        const m = lines[i].trim().match(/\/dev\/video(\d+)/);
+        if (m) {
+          indices.push(parseInt(m[1], 10));
+          break;
+        }
+      }
+    }
+    indices.sort((a, b) => a - b);
+    return indices;
+  } catch {
+    return [];
+  }
+}
 
 const app = express();
 app.use(cors());
@@ -53,8 +78,34 @@ function startCamera(index: number): void {
   cameraBridge.start();
   console.log(`[Camera] 已启用 /dev/video${index} (${CAMERA_FPS} FPS)`);
 }
+
+// 第二个摄像头（可选）
+let cameraBridge2: RobotBridge | null = null;
+let activeCameraIndex2 = -1;
+function startCamera2(index: number): void {
+  if (!ENABLE_CAMERA || index < 0) return;
+  if (cameraBridge2) cameraBridge2.stop();
+  activeCameraIndex2 = index;
+  cameraBridge2 = new RobotBridge(CAMERA_SCRIPT, ["--camera-index", String(index), "--fps", String(CAMERA_FPS)], PYTHON_PATH);
+  cameraBridge2.on("message", (msg: BridgeMessage) => {
+    if (msg.type === "camera_frame" && msg.data) {
+      streamManager.updateFrameFromBase64("camera2", msg.data);
+      broadcast({ type: "camera2_frame", data: msg.data, ts: msg.ts });
+    } else if (msg.type === "camera_error") console.error(`[Camera2] ${String(msg.error || "摄像头不可用")}`);
+  });
+  cameraBridge2.start();
+  console.log(`[Camera2] 已启用 /dev/video${index} (${CAMERA_FPS} FPS)`);
+}
+
 if (ENABLE_CAMERA) {
-  startCamera(DEFAULT_CAMERA_INDEX);
+  const cameraIndices = detectUsbCameraIndices();
+  if (cameraIndices.length > 0) {
+    console.log(`[Camera] 检测到 ${cameraIndices.length} 个 USB 摄像头: ${cameraIndices.map(i => `/dev/video${i}`).join(", ")}`);
+    startCamera(cameraIndices[0]);
+    if (cameraIndices.length > 1) startCamera2(cameraIndices[1]);
+  } else {
+    console.log("[Camera] 未检测到 USB 摄像头");
+  }
 } else {
   console.log("[Camera] 默认关闭；需要摄像头时设置 ENABLE_CAMERA=1");
 }
@@ -85,8 +136,18 @@ app.get("/api/cameras", (req, res) => {
   try {
     const cameras = fs.readdirSync("/dev").filter((name) => /^video\\d+$/.test(name)).sort()
       .map((name) => ({ index: Number(name.slice(5)), path: `/dev/${name}` }));
-    res.json({ cameras, active: activeCameraIndex });
-  } catch { res.json({ cameras: [], active: activeCameraIndex }); }
+    res.json({
+      cameras,
+      active: { camera: activeCameraIndex, camera2: activeCameraIndex2 },
+      detected: detectUsbCameraIndices(),
+    });
+  } catch {
+    res.json({
+      cameras: [],
+      active: { camera: activeCameraIndex, camera2: activeCameraIndex2 },
+      detected: [],
+    });
+  }
 });
 
 // 仅向已打开控制台的浏览器提供指定 Leader 的公开标定数据；ID 限制防止路径穿越。
@@ -96,7 +157,7 @@ app.get("/api/calibration/leader/:id", (req, res) => {
     res.status(400).json({ ok: false, error: "无效的 Leader ID" });
     return;
   }
-  const file = path.join(process.env.HOME || "/home/jiang", ".lerobot", "calibration", "so101_leader", `${id}.json`);
+  const file = path.join(process.env.HOME || "/root", ".lerobot", "calibration", "so101_leader", `${id}.json`);
   try {
     res.json({ ok: true, calibration: JSON.parse(fs.readFileSync(file, "utf-8")) });
   } catch {
@@ -218,6 +279,25 @@ app.get("/api/status", (req, res) => {
   });
 });
 
+// 切换摄像头
+app.post("/api/camera/switch", (req, res) => {
+  const { view, index } = req.body;
+  if (view !== "camera" && view !== "camera2") {
+    res.status(400).json({ ok: false, error: "view 必须是 camera 或 camera2" });
+    return;
+  }
+  if (!Number.isInteger(index) || index < 0) {
+    res.status(400).json({ ok: false, error: "index 必须是正整数" });
+    return;
+  }
+  if (view === "camera") {
+    startCamera(index);
+  } else {
+    startCamera2(index);
+  }
+  res.json({ ok: true, view, index, active: view === "camera" ? activeCameraIndex : activeCameraIndex2 });
+});
+
 // MJPEG 流端点
 app.get("/video/mujoco", (req, res) => {
   streamManager.handleStream("mujoco", req, res);
@@ -225,6 +305,10 @@ app.get("/video/mujoco", (req, res) => {
 
 app.get("/video/camera", (req, res) => {
   streamManager.handleStream("camera", req, res);
+});
+
+app.get("/video/camera2", (req, res) => {
+  streamManager.handleStream("camera2", req, res);
 });
 
 // 健康检查
@@ -287,7 +371,7 @@ wss.on("connection", (ws) => {
 
 function broadcast(msg: BridgeMessage): void {
   const data = JSON.stringify(msg);
-  const isVideoFrame = msg.type === "mujoco_frame" || msg.type === "camera_frame";
+  const isVideoFrame = msg.type === "mujoco_frame" || msg.type === "camera_frame" || msg.type === "camera2_frame";
   for (const client of clients) {
     if (client.readyState === WebSocket.OPEN) {
       // 视频是最新帧优先的数据。客户端网络落后时丢弃本帧，避免 WebSocket
@@ -304,6 +388,8 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`[Robot Server] 监听在 http://0.0.0.0:${PORT}`);
   console.log(`[Robot Server] WebSocket: ws://0.0.0.0:${PORT}/ws`);
   console.log(`[Robot Server] MuJoCo流: http://0.0.0.0:${PORT}/video/mujoco`);
+  console.log(`[Robot Server] 摄像头1: http://0.0.0.0:${PORT}/video/camera`);
+  console.log(`[Robot Server] 摄像头2: http://0.0.0.0:${PORT}/video/camera2`);
   console.log(`[Robot Server] API: /api/ports /api/start /api/stop /api/status`);
 });
 
@@ -311,6 +397,7 @@ process.on("SIGINT", () => {
   console.log("[Robot Server] 退出中...");
   if (bridge) bridge.stop();
   if (cameraBridge) cameraBridge.stop();
+  if (cameraBridge2) cameraBridge2.stop();
   for (const client of clients) client.close();
   server.close();
   process.exit(0);

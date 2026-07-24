@@ -5,7 +5,7 @@
 set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-export PYTHON_PATH="${PYTHON_PATH:-/home/jiang/miniconda3/envs/lerobot/bin/python}"
+export PYTHON_PATH="${PYTHON_PATH:-python3}"
 export PORT="${PORT:-3000}"
 export ENABLE_CAMERA="${ENABLE_CAMERA:-1}"
 export CAMERA_FPS="${CAMERA_FPS:-15}"
@@ -15,7 +15,7 @@ HTTPS_KEY="${HTTPS_KEY:-}"
 
 echo "=== SO-101 遥操作一键启动 ==="
 echo "Python: $PYTHON_PATH"
-echo "摄像头: $([ "$ENABLE_CAMERA" = "1" ] && echo "启用 (${CAMERA_FPS} FPS)" || echo "关闭（轻量模式）")"
+echo "摄像头: 自动检测 USB 摄像头 ($CAMERA_FPS FPS)"
 if [ -n "$HTTPS_CERT" ] || [ -n "$HTTPS_KEY" ]; then
     if [ ! -f "$HTTPS_CERT" ] || [ ! -f "$HTTPS_KEY" ]; then
         echo "错误: HTTPS_CERT 或 HTTPS_KEY 文件不存在"
