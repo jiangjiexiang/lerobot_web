@@ -1,6 +1,6 @@
 # LeRobot Web · SO-101 遥操作控制台
 
-用于 SO-101 Leader / Follower 机械臂的网页遥操作与 MuJoCo 实时镜像。当前稳定使用方式是 **两只机械臂连接同一台机器人电脑**；浏览器通过网页控制台启动、停止和观察遥操作。
+用于 SO-101 Leader / Follower 机械臂的网页遥操作。当前稳定使用方式是 **两只机械臂连接同一台机器人电脑**；浏览器通过网页控制台启动、停止和观察遥操作。MuJoCo 功能已关闭，控制链路不再初始化仿真或生成仿真帧。
 
 > 要把 Leader 放到另一台 Wi‑Fi 电脑，请先阅读 [双电脑 Wi‑Fi 遥操作设计](docs/WIFI_TWO_COMPUTER_TELEOP.md)。项目中已有 `operator-server` 原型，但它与当前一体化桥接脚本的消息协议尚未完成对接，不能直接用于生产遥操作。
 
@@ -11,8 +11,8 @@
                                       │                     │
                                       │                     ├─ /dev/ttyACM0  Follower（从臂）
                                       │                     ├─ /dev/ttyACM1  Leader（主臂）
-                                      │                     └─ MuJoCo 离屏渲染
-                                      └─ 网页关节数据 / MuJoCo JPEG 帧
+                                      │                     └─ 摄像头采集
+                                      └─ 控制状态 / 独立摄像头推流
 ```
 
 默认映射（请以实际线缆为准）：
@@ -31,7 +31,7 @@ cd ~/lerobot_web
 
 打开 `http://localhost:5173`。页面中确认串口和 ID 后启动遥操作；建议先选择“仅网页画面”。
 
-默认启动为轻量模式：关闭 MuJoCo 网页推流，控制频率为 60 FPS，并开启机器人摄像头（15 FPS）。网页会枚举 `/dev/video*` 并允许选择摄像头。如需关闭摄像头，可使用 `ENABLE_CAMERA=0 ./start_robot.sh`；如需恢复 MuJoCo 网页流，可设置 `STREAM_FPS=10`。
+默认启动为轻量模式：控制频率为 60 FPS，并开启机器人摄像头（15 FPS）。网页会枚举 `/dev/video*` 并允许选择摄像头。如需关闭摄像头，可使用 `ENABLE_CAMERA=0 ./start_robot.sh`。MuJoCo 已关闭，`STREAM_FPS` 不再启用仿真推流。
 
 ### 局域网 HTTPS（Web Serial 的前置条件）
 
@@ -69,7 +69,8 @@ HTTPS_KEY="$PWD/.certs/lerobot-lan.key" \
 | --- | --- |
 | 网页开发服务器 | `http://localhost:5173` |
 | Robot API | `http://localhost:43127` |
-| WebSocket | `ws://localhost:43127/ws/control` |
+| 控制 WebSocket | `ws://localhost:43127/ws/control` |
+| 推流 WebSocket | `ws://localhost:43127/ws/stream` |
 | 健康检查 | `http://localhost:43127/health` |
 
 ## 常用操作
@@ -95,13 +96,13 @@ ls /dev/ttyACM* /dev/ttyUSB*
 
 ### 画面质量
 
-网页 MuJoCo 输出为 1920×1080。60 FPS 会显著增加 GPU、JPEG 编码和 Wi‑Fi/局域网负载；若出现掉帧，保持 1080p 并改为 30 FPS 或 15 FPS。
+摄像头 JPEG 推流会占用网络和 CPU；若出现掉帧，降低 `CAMERA_FPS`。控制 WebSocket 与推流 WebSocket 已分离，视频拥塞不应阻塞控制指令。
 
 ## 项目结构
 
 ```text
-bridge/                 Python 串口、遥操作与 MuJoCo 桥接
-  teleop_mujoco.py      当前单机遥操作主程序
+bridge/                 Python 串口、遥操作与摄像头桥接
+  teleop_mujoco.py      当前单机遥操作主程序（MuJoCo 已禁用）
   leader_bridge.py      Leader 只读桥接（双电脑方案使用）
   models/               MuJoCo 模型与资源
 robot-server/           当前机器人端 API / WebSocket 服务
@@ -125,3 +126,7 @@ cd ../robot-server && npm run build
 - 启动前确保 Follower 周围无障碍物，首次运行时保持低速、小幅度动作。
 - 网络遥操作必须加入失联超时和急停；具体要求见 [双电脑 Wi‑Fi 遥操作设计](docs/WIFI_TWO_COMPUTER_TELEOP.md)。
 - 不要把控制端口直接暴露到公网。
+
+## 交给 AI 部署
+
+需要在新电脑上部署或排错时，直接把 [AI 部署与排错操作手册](docs/AI_DEPLOYMENT_AND_TROUBLESHOOTING.md) 连同终端日志交给 AI。手册要求 AI 先检查环境、端口和串口，再执行修改，不应跳过安全检查直接驱动机械臂。

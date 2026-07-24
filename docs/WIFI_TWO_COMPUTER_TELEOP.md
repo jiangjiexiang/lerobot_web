@@ -2,15 +2,15 @@
 
 ## 目标
 
-让主臂（Leader）接在 **操作电脑**，从臂（Follower）与 MuJoCo 接在 **机器人电脑**。两台电脑连接同一可信 Wi‑Fi，操作电脑只需 Chrome/Edge 浏览器：网页借助 Web Serial 读取 Leader 的关节角度并发送给机器人电脑，机器人电脑再驱动 Follower。
+让主臂（Leader）接在 **操作电脑**，从臂（Follower）接在 **机器人电脑**。两台电脑连接同一可信 Wi‑Fi，操作电脑只需 Chrome/Edge 浏览器：网页借助 Web Serial 读取 Leader 的关节角度并发送给机器人电脑，机器人电脑再驱动 Follower。MuJoCo 已关闭。
 
 ```text
 操作电脑（Operator）                                    机器人电脑（Robot）
 ┌──────────────────────────────────────┐              ┌──────────────────────────────────────┐
 │ Leader USB → /dev/ttyACM*             │              │ Follower USB → /dev/ttyACM*           │
 │ leader_bridge.py                       │              │ follower_bridge.py                     │
-│ operator-server :3001                  │── Wi‑Fi ───▶│ robot-server :3000                     │
-│ 浏览器（可选，本地状态页）              │  WebSocket   │ MuJoCo / 浏览器监控                    │
+│ operator-server :3001                  │── Wi‑Fi ───▶│ robot-server :43127                   │
+│ 浏览器（可选，本地状态页）              │  WebSocket   │ 浏览器监控 / 摄像头                    │
 └──────────────────────────────────────┘              └──────────────────────────────────────┘
               关节采样 / 控制指令                                    执行、状态和视频回传
 ```
@@ -27,20 +27,20 @@
 
 | 设备 | 示例地址 | 需要监听的端口 |
 | --- | --- | --- |
-| 机器人电脑 | `192.168.1.50` | TCP 3000 |
+| 机器人电脑 | `192.168.1.50` | TCP 43127 |
 | 操作电脑 | `192.168.1.51` | 本地 3001（可选） |
 
-机器人端应是服务端，操作端主动连接：`ws://192.168.1.50:3000/ws`。这样无需在操作电脑上开放控制入站端口。
+机器人端应是服务端，操作端主动连接：`ws://192.168.1.50:43127/ws/control`。视频使用独立的 `/ws/stream` 通道；这样无需在操作电脑上开放控制入站端口。
 
 在接机械臂前验证网络：
 
 ```bash
 # 操作电脑上
-curl http://192.168.1.50:3000/health
-nc -vz 192.168.1.50 3000
+curl http://192.168.1.50:43127/health
+nc -vz 192.168.1.50 43127
 ```
 
-若机器人服务运行在 WSL2，必须先确认该端口能从局域网访问。WSL 的默认 NAT 网络有时只允许 Windows 本机访问；可使用 WSL 镜像网络或在 Windows 主机配置受限的端口转发。无论哪种方式，都只允许可信 Wi‑Fi 网段访问 TCP 3000。
+若机器人服务运行在 WSL2，必须先确认该端口能从局域网访问。WSL 的默认 NAT 网络有时只允许 Windows 本机访问；可使用 WSL 镜像网络或在 Windows 主机配置受限的端口转发。无论哪种方式，都只允许可信 Wi‑Fi 网段访问 TCP 43127。
 
 ## 推荐消息协议
 
@@ -80,7 +80,7 @@ nc -vz 192.168.1.50 3000
 }
 ```
 
-视频和 MuJoCo 帧不应与 60 Hz 控制指令争抢同一无节流通道。控制通道优先；视频使用单独的 MJPEG/HTTP 流或独立 WebSocket，并且只保留最新帧。
+视频不应与 60 Hz 控制指令争抢同一无节流通道。控制使用 `/ws/control`；摄像头使用独立 `/ws/stream`，并且只保留最新帧。MuJoCo 已关闭。
 
 ## 组件职责
 
@@ -89,9 +89,9 @@ nc -vz 192.168.1.50 3000
 | `leader_bridge.py` | 操作电脑 | 只读 Leader；不向 Leader 写入位置 |
 | `operator-server` | 操作电脑 | 连接管理、限频、将 Leader 数据转换为 `action` |
 | `robot-server` | 机器人电脑 | 鉴权、心跳/超时、指令校验、状态与视频服务 |
-| `follower_bridge.py`（新增） | 机器人电脑 | 独占 Follower 串口，执行动作、读取反馈、更新 MuJoCo |
+| `follower_bridge.py`（新增） | 机器人电脑 | 独占 Follower 串口，执行动作并读取反馈 |
 
-`follower_bridge.py` 应从 stdin 接收 JSON `action`，并从 stdout 输出 `follower_observation`、`mujoco_frame`。机器人服务负责把 WebSocket 的 `action` 转发给它。不要让多个进程同时打开 Follower 串口。
+`follower_bridge.py` 应从 stdin 接收 JSON `action`，并从 stdout 输出 `follower_observation`。机器人服务负责把 WebSocket 的 `action` 转发给它。不要让多个进程同时打开 Follower 串口。
 
 ## 失联与安全策略（必须实现）
 
@@ -115,7 +115,7 @@ nc -vz 192.168.1.50 3000
 
 1. 新建仅管理 Follower 的桥接进程，先使用模拟数据或低速单关节测试。
 2. 接入 `action` 校验、序号检查与 150 ms 看门狗。
-3. 将 Follower 反馈和 MuJoCo 帧回传；验证网络中断时动作停止。
+3. 将 Follower 反馈回传；验证网络中断时动作停止。
 
 ### 阶段 3：端到端低风险遥操作
 
@@ -125,7 +125,7 @@ nc -vz 192.168.1.50 3000
 
 ### 阶段 4：安全加固
 
-使用 WPA2/WPA3 可信网络；跨网络访问时优先使用 WireGuard/Tailscale 等私网，不要将 3000 端口公网映射。为控制 WebSocket 添加令牌或双向 TLS，并在机器人端做来源限制。
+使用 WPA2/WPA3 可信网络；跨网络访问时优先使用 WireGuard/Tailscale 等私网，不要将 43127 端口公网映射。为控制 WebSocket 添加令牌或双向 TLS，并在机器人端做来源限制。
 
 ## 启动步骤
 

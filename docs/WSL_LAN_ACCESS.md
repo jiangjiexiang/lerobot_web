@@ -2,7 +2,7 @@
 
 如果 Robot Server 与 Vite 运行在 WSL2 默认 NAT 网络中，另一台电脑通常不能直接访问 WSL 的 `172.*` 地址。操作电脑应访问 **Windows 主机的 Wi‑Fi IPv4 地址**，并将 Windows 的 5173/TCP 转发至 WSL。
 
-浏览器访问的唯一端口是 5173：Vite 会在 WSL 内把 `/api` 和 `/ws` 代理到 Robot Server 3000。因此不必把 3000 暴露到局域网。
+浏览器访问的唯一端口是 5173：Vite 会在 WSL 内把 `/api`、`/video` 和 `/ws` 代理到 Robot Server 43127。因此通常不必把 43127 暴露到局域网；只有操作端直接访问 Robot API 时才需要转发该端口。
 
 ## 1. 获取地址
 
