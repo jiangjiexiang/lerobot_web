@@ -16,7 +16,7 @@ const CAMERA_SCRIPT = path.join(BRIDGE_DIR, "camera_stream.py");
 const PYTHON_PATH = process.env.PYTHON_PATH || "python3";
 const FRONTEND_DIST = path.join(__dirname, "../../frontend/dist");
 const ENABLE_CAMERA = process.env.ENABLE_CAMERA !== "0" && process.env.ENABLE_CAMERA !== "false";
-const CAMERA_FPS = parseInt(process.env.CAMERA_FPS || "15", 10);
+const CAMERA_FPS = parseInt(process.env.CAMERA_FPS || "30", 10);
 const DEFAULT_STREAM_FPS = parseInt(process.env.STREAM_FPS || "0", 10);
 
 function detectUsbCameraIndices(): number[] {
@@ -76,20 +76,37 @@ let remoteLeaderActive = false;
 let latestObservation: BridgeMessage | null = null;
 const clients = new Set<WebSocket>();
 const streamClients = new Set<WebSocket>();
+let controlDisconnectTimer: NodeJS.Timeout | null = null;
+
+function stopTeleop(): boolean {
+  if (!bridge || !bridge.isRunning()) return false;
+  stopping = true;
+  bridge.stop();
+  broadcastControl({ type: "status", running: false });
+  return true;
+}
 
 // 摄像头是可选资源：默认关闭，避免服务启动时常驻 OpenCV 进程并占用 USB 摄像头。
 let cameraBridge: RobotBridge | null = null;
 let activeCameraIndex = -1;
+let cameraLastFrameAt = 0;
+let cameraError: string | null = null;
 function startCamera(index: number): void {
   if (!ENABLE_CAMERA || index < 0) return;
   if (cameraBridge) cameraBridge.stop();
   activeCameraIndex = index;
+  cameraLastFrameAt = 0;
+  cameraError = null;
   cameraBridge = new RobotBridge(CAMERA_SCRIPT, ["--camera-index", String(index), "--fps", String(CAMERA_FPS)], PYTHON_PATH);
   cameraBridge.on("message", (msg: BridgeMessage) => {
     if (msg.type === "camera_frame" && msg.data) {
+      cameraLastFrameAt = Date.now();
       streamManager.updateFrameFromBase64("camera", msg.data);
       broadcastStream(msg);
-    } else if (msg.type === "camera_error") console.error(`[Camera] ${String(msg.error || "摄像头不可用")}`);
+    } else if (msg.type === "camera_error") {
+      cameraError = String(msg.error || "摄像头不可用");
+      console.error(`[Camera] ${cameraError}`);
+    }
   });
   cameraBridge.start();
   console.log(`[Camera] 已启用 /dev/video${index} (${CAMERA_FPS} FPS)`);
@@ -98,16 +115,24 @@ function startCamera(index: number): void {
 // 第二个摄像头（可选）
 let cameraBridge2: RobotBridge | null = null;
 let activeCameraIndex2 = -1;
+let camera2LastFrameAt = 0;
+let camera2Error: string | null = null;
 function startCamera2(index: number): void {
   if (!ENABLE_CAMERA || index < 0) return;
   if (cameraBridge2) cameraBridge2.stop();
   activeCameraIndex2 = index;
+  camera2LastFrameAt = 0;
+  camera2Error = null;
   cameraBridge2 = new RobotBridge(CAMERA_SCRIPT, ["--camera-index", String(index), "--fps", String(CAMERA_FPS)], PYTHON_PATH);
   cameraBridge2.on("message", (msg: BridgeMessage) => {
     if (msg.type === "camera_frame" && msg.data) {
+      camera2LastFrameAt = Date.now();
       streamManager.updateFrameFromBase64("camera2", msg.data);
       broadcastStream({ type: "camera2_frame", data: msg.data, ts: msg.ts });
-    } else if (msg.type === "camera_error") console.error(`[Camera2] ${String(msg.error || "摄像头不可用")}`);
+    } else if (msg.type === "camera_error") {
+      camera2Error = String(msg.error || "摄像头不可用");
+      console.error(`[Camera2] ${camera2Error}`);
+    }
   });
   cameraBridge2.start();
   console.log(`[Camera2] 已启用 /dev/video${index} (${CAMERA_FPS} FPS)`);
@@ -150,7 +175,7 @@ app.get("/api/ports", (req, res) => {
 
 app.get("/api/cameras", (req, res) => {
   try {
-    const cameras = fs.readdirSync("/dev").filter((name) => /^video\\d+$/.test(name)).sort()
+    const cameras = fs.readdirSync("/dev").filter((name) => /^video\d+$/.test(name)).sort((a, b) => Number(a.slice(5)) - Number(b.slice(5)))
       .map((name) => ({ index: Number(name.slice(5)), path: `/dev/${name}` }));
     res.json({
       cameras,
@@ -164,6 +189,56 @@ app.get("/api/cameras", (req, res) => {
       detected: [],
     });
   }
+});
+
+app.get("/api/self-check", (req, res) => {
+  const followerId = typeof req.query.follower_id === "string" ? req.query.follower_id : "R12253102";
+  const now = Date.now();
+  const detected = detectUsbCameraIndices();
+  let acmPorts: string[] = [];
+  try {
+    acmPorts = fs.readdirSync("/dev")
+      .filter((name) => /^ttyACM\d+$/.test(name))
+      .sort((a, b) => Number(a.slice(6)) - Number(b.slice(6)))
+      .map((name) => `/dev/${name}`);
+  } catch { /* /dev unavailable */ }
+  const calibrationPath = /^[A-Za-z0-9_-]+$/.test(followerId)
+    ? path.join(process.env.HOME || "/root", ".lerobot", "calibration", "so101_follower", `${followerId}.json`)
+    : "";
+
+  let calibrationValid = false;
+  if (calibrationPath) {
+    try {
+      const calibration = JSON.parse(fs.readFileSync(calibrationPath, "utf-8"));
+      calibrationValid = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+        .every((name) => Number.isInteger(calibration[name]?.id));
+    } catch { /* invalid or missing calibration */ }
+  }
+
+  const cameraStatus = (index: number, child: RobotBridge | null, lastFrameAt: number, error: string | null) => ({
+    index,
+    detected: index >= 0 && detected.includes(index),
+    processRunning: Boolean(child?.isRunning()),
+    frameFresh: lastFrameAt > 0 && now - lastFrameAt < 2000,
+    lastFrameAgeMs: lastFrameAt > 0 ? now - lastFrameAt : null,
+    error,
+  });
+
+  res.json({
+    checkedAt: new Date(now).toISOString(),
+    server: { ok: true, running: bridge ? bridge.isRunning() && !stopping : false },
+    follower: {
+      ports: acmPorts,
+      portPresent: acmPorts.length > 0,
+      id: followerId,
+      calibrationValid,
+    },
+    camerasDetected: detected,
+    cameras: [
+      cameraStatus(activeCameraIndex, cameraBridge, cameraLastFrameAt, cameraError),
+      cameraStatus(activeCameraIndex2, cameraBridge2, camera2LastFrameAt, camera2Error),
+    ],
+  });
 });
 
 // 仅向已打开控制台的浏览器提供指定 Leader 的公开标定数据；ID 限制防止路径穿越。
@@ -201,6 +276,27 @@ app.post("/api/start", (req, res) => {
     camera_fps = 15,
   } = req.body;
 
+  if (typeof follower_port !== "string" || !follower_port.startsWith("/dev/tty")) {
+    res.status(400).json({ ok: false, error: "Follower 串口无效" });
+    return;
+  }
+  if (typeof follower_id !== "string" || !/^[A-Za-z0-9_-]+$/.test(follower_id)) {
+    res.status(400).json({ ok: false, error: "Follower ID 无效" });
+    return;
+  }
+  if (!remote_leader && (typeof leader_port !== "string" || !leader_port.startsWith("/dev/tty"))) {
+    res.status(400).json({ ok: false, error: "Leader 串口无效" });
+    return;
+  }
+  if (!remote_leader && (typeof leader_id !== "string" || !/^[A-Za-z0-9_-]+$/.test(leader_id))) {
+    res.status(400).json({ ok: false, error: "Leader ID 无效" });
+    return;
+  }
+  if (!Number.isInteger(fps) || fps < 1 || fps > 60) {
+    res.status(400).json({ ok: false, error: "FPS 必须是 1-60 之间的整数" });
+    return;
+  }
+
   if (ENABLE_CAMERA && Number.isInteger(camera_index) && camera_index >= 0 && camera_index !== activeCameraIndex) {
     startCamera(camera_index);
   }
@@ -215,9 +311,6 @@ app.post("/api/start", (req, res) => {
   ];
   if (viewer) args.push("--viewer");
   if (remote_leader) args.push("--remote-leader");
-  if (Number.isInteger(camera_index) && camera_index >= 0) {
-    args.push("--camera-index", String(camera_index), "--camera-fps", String(camera_fps));
-  }
 
   console.log(`[Server] 启动遥操作: ${PYTHON_PATH} ${TELEOP_SCRIPT} ${args.join(" ")}`);
 
@@ -225,6 +318,7 @@ app.post("/api/start", (req, res) => {
   bridge = startedBridge;
   stopping = false;
   remoteLeaderActive = Boolean(remote_leader);
+  latestObservation = null;
 
   startedBridge.on("message", (msg: BridgeMessage) => {
     switch (msg.type) {
@@ -267,15 +361,10 @@ app.post("/api/start", (req, res) => {
 
 // 停止遥操作
 app.post("/api/stop", (req, res) => {
-  if (!bridge || !bridge.isRunning()) {
-    res.status(400).json({ ok: false, error: "未在运行" });
+  if (!stopTeleop()) {
+    res.json({ ok: true, alreadyStopped: true });
     return;
   }
-  const activeBridge = bridge;
-  stopping = true;
-  activeBridge.stop();
-  // 不等待 Python 清理完成才更新界面，避免停止按钮看起来没有反应。
-  broadcastControl({ type: "status", running: false });
   res.json({ ok: true });
 });
 
@@ -325,6 +414,11 @@ app.get("/health", (req, res) => {
   });
 });
 
+// 未知 API 必须返回 JSON 404，不能落入 SPA fallback 后返回 index.html。
+app.use("/api", (req, res) => {
+  res.status(404).json({ ok: false, error: `API 不存在: ${req.method} ${req.originalUrl}` });
+});
+
 // serve 前端静态文件 (生产模式)
 app.use(express.static(FRONTEND_DIST));
 
@@ -347,6 +441,10 @@ app.use((req, res) => {
 controlWss.on("connection", (ws) => {
   console.log("[Server] 新控制客户端连接");
   clients.add(ws);
+  if (controlDisconnectTimer) {
+    clearTimeout(controlDisconnectTimer);
+    controlDisconnectTimer = null;
+  }
 
   // 发送当前状态
   ws.send(JSON.stringify({ type: "status", running: bridge ? bridge.isRunning() && !stopping : false }));
@@ -359,7 +457,7 @@ controlWss.on("connection", (ws) => {
   ws.on("message", (data) => {
     try {
       const msg = JSON.parse(data.toString());
-      if (msg.type === "action" && bridge && remoteLeaderActive) {
+      if (msg.type === "action" && bridge?.isRunning() && remoteLeaderActive && !stopping) {
         bridge.send(msg);
       }
     } catch (err) {
@@ -370,6 +468,16 @@ controlWss.on("connection", (ws) => {
   ws.on("close", () => {
     console.log("[Server] 控制客户端断开");
     clients.delete(ws);
+    if (remoteLeaderActive && clients.size === 0 && !controlDisconnectTimer) {
+      // 页面刷新和 Wi-Fi 瞬断会很快重连；给短暂宽限期，持续断开才安全停机。
+      controlDisconnectTimer = setTimeout(() => {
+        controlDisconnectTimer = null;
+        if (remoteLeaderActive && clients.size === 0 && stopTeleop()) {
+          console.warn("[Server] 远程 Leader 控制连接持续断开，已自动停止遥操作");
+        }
+      }, 3000);
+      controlDisconnectTimer.unref();
+    }
   });
 });
 
@@ -393,7 +501,7 @@ function broadcastStream(msg: BridgeMessage | object): void {
   for (const client of streamClients) {
     if (client.readyState === WebSocket.OPEN) {
       // 推流只保留最新帧；慢客户端直接丢弃，绝不形成积压。
-      if (client.bufferedAmount > 512 * 1024) continue;
+      if (client.bufferedAmount > 128 * 1024) continue;
       client.send(data);
     }
   }
@@ -415,6 +523,7 @@ process.on("SIGINT", () => {
   if (bridge) bridge.stop();
   if (cameraBridge) cameraBridge.stop();
   if (cameraBridge2) cameraBridge2.stop();
+  if (controlDisconnectTimer) clearTimeout(controlDisconnectTimer);
   for (const client of clients) client.close();
   server.close();
   process.exit(0);

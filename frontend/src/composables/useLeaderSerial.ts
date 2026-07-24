@@ -12,7 +12,11 @@ function packet(id: number, instruction: number, params: number[]) {
   return new Uint8Array([...bytes, (~bytes.slice(2).reduce((sum, byte) => sum + byte, 0)) & 0xff]);
 }
 
-export function useLeaderSerial(send: (message: object) => void, log: (message: string) => void) {
+export function useLeaderSerial(
+  send: (message: object) => void,
+  log: (message: string) => void,
+  onFatalDisconnect: () => Promise<void>,
+) {
   const connected = ref(false);
   const error = ref<string | null>(null);
   const joints = ref<JointData | null>(null);
@@ -21,8 +25,24 @@ export function useLeaderSerial(send: (message: object) => void, log: (message: 
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
   let buffer: number[] = [];
   let active = false;
+  let readFailure: Error | null = null;
+  let consecutivePollFailures = 0;
 
-  async function nextPacket(timeoutMs = 60): Promise<number[]> {
+  const delay = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+
+  async function readLoop() {
+    try {
+      while (reader) {
+        const read = await reader.read();
+        if (read.done) throw new Error("串口已关闭");
+        buffer.push(...read.value);
+      }
+    } catch (cause) {
+      if (active) readFailure = cause instanceof Error ? cause : new Error(String(cause));
+    }
+  }
+
+  async function nextPacket(expectedId: number, minimumParams: number, timeoutMs = 250): Promise<number[]> {
     const deadline = performance.now() + timeoutMs;
     while (performance.now() < deadline) {
       while (buffer.length >= 4) {
@@ -33,25 +53,34 @@ export function useLeaderSerial(send: (message: object) => void, log: (message: 
         if (buffer.length < total) break;
         const value = buffer.splice(0, total);
         const checksum = (~value.slice(2, -1).reduce((sum, byte) => sum + byte, 0)) & 0xff;
-        if (value[value.length - 1] === checksum) return value;
+        if (value[value.length - 1] !== checksum) continue;
+        // 关闭扭矩等写命令可能留下 ACK；只接收当前读取请求的完整响应。
+        if (value[2] !== expectedId || value[3] < minimumParams + 2) continue;
+        return value;
       }
-      if (!reader) break;
-      const read = await Promise.race([
-        reader.read(),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("读取超时")), Math.max(1, deadline - performance.now()))),
-      ]);
-      if (read.done) throw new Error("串口已关闭");
-      buffer.push(...read.value);
+      if (readFailure) throw readFailure;
+      if (!reader) throw new Error("串口已关闭");
+      await delay(2);
     }
-    throw new Error("电机无响应");
+    throw new Error("读取超时");
   }
 
   async function readPosition(id: number): Promise<number> {
     if (!writer) throw new Error("串口尚未连接");
-    await writer.write(packet(id, 0x02, [56, 2]));
-    const response = await nextPacket();
-    if (response[2] !== id || response[4] !== 0) throw new Error(`电机 ${id} 返回异常`);
-    return response[5] | (response[6] << 8);
+    let lastError = "读取超时";
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      await writer.write(packet(id, 0x02, [56, 2]));
+      try {
+        const response = await nextPacket(id, 2);
+        if (response[4] !== 0) throw new Error(`返回错误码 ${response[4]}`);
+        return response[5] | (response[6] << 8);
+      } catch (cause) {
+        lastError = cause instanceof Error ? cause.message : String(cause);
+        if (readFailure || !active) break;
+        await delay(20);
+      }
+    }
+    throw new Error(`电机 ${id} ${lastError}（已重试 3 次）`);
   }
 
   async function disableLeaderTorque() {
@@ -84,15 +113,26 @@ export function useLeaderSerial(send: (message: object) => void, log: (message: 
     const calibration = calibrationJson.calibration as Calibration;
     if (!names.every((name) => calibration[name])) throw new Error("Leader 标定缺少关节数据");
 
-    port = await serial.requestPort();
-    await port.open({ baudRate: 1_000_000, bufferSize: 1024 });
-    reader = port.readable?.getReader() || null;
-    writer = port.writable?.getWriter() || null;
-    if (!reader || !writer) throw new Error("无法打开串口读写通道");
-    await disableLeaderTorque();
-    connected.value = true;
-    active = true;
-    log("Leader COM 已连接，已关闭 Leader 扭矩，开始只读采样");
+    try {
+      port = await serial.requestPort();
+      await port.open({ baudRate: 1_000_000, bufferSize: 1024 });
+      reader = port.readable?.getReader() || null;
+      writer = port.writable?.getWriter() || null;
+      if (!reader || !writer) throw new Error("无法打开串口读写通道");
+      active = true;
+      readFailure = null;
+      consecutivePollFailures = 0;
+      void readLoop();
+      await disableLeaderTorque();
+      // 给半双工适配器留出发送 ACK 和切回接收方向的时间。
+      await delay(150);
+      buffer = [];
+      connected.value = true;
+      log("Leader COM 已连接，已关闭 Leader 扭矩，开始只读采样");
+    } catch (cause) {
+      await disconnect();
+      throw cause;
+    }
 
     const interval = Math.max(16, Math.round(1000 / Math.min(60, Math.max(1, fps))));
     const poll = async () => {
@@ -102,10 +142,31 @@ export function useLeaderSerial(send: (message: object) => void, log: (message: 
         for (const name of names) values[name] = normalize(await readPosition(calibration[name].id), name, calibration[name]);
         joints.value = values;
         send({ type: "action", joints: values, ts_ms: Date.now() });
+        if (consecutivePollFailures > 0) {
+          log(`Leader 串口已恢复（连续丢包 ${consecutivePollFailures} 轮）`);
+          error.value = null;
+          consecutivePollFailures = 0;
+        }
       } catch (cause) {
-        error.value = cause instanceof Error ? cause.message : String(cause);
+        // 用户主动停止会取消正在等待的串口读取，不应记录为设备故障。
+        if (!active) return;
+        const message = cause instanceof Error ? cause.message : String(cause);
+        if (!readFailure && message.includes("读取超时")) {
+          consecutivePollFailures += 1;
+          error.value = `${message}；正在自动恢复 (${consecutivePollFailures}/5)`;
+          if (consecutivePollFailures === 1) log(`Leader 串口瞬时丢包: ${error.value}`);
+          // 丢弃不完整的一轮动作；机器人端超时后保持当前位置，下一轮重新读取全部关节。
+          buffer = [];
+          if (consecutivePollFailures < 5) {
+            window.setTimeout(poll, 50);
+            return;
+          }
+        } else {
+          error.value = message;
+        }
         log(`Leader 串口错误: ${error.value}`);
         await disconnect();
+        await onFatalDisconnect();
         return;
       }
       window.setTimeout(poll, interval);
@@ -119,6 +180,8 @@ export function useLeaderSerial(send: (message: object) => void, log: (message: 
     try { await reader?.cancel(); } catch { /* port may already be gone */ }
     try { reader?.releaseLock(); writer?.releaseLock(); } catch { /* ignore */ }
     reader = null; writer = null; buffer = [];
+    readFailure = null;
+    consecutivePollFailures = 0;
     try { await port?.close(); } catch { /* ignore */ }
     port = null;
   }

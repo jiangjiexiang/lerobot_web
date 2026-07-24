@@ -5,10 +5,10 @@
 set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-export PYTHON_PATH="${PYTHON_PATH:-python3}"
+export PYTHON_PATH="${PYTHON_PATH:-/home/nvidia/miniconda3/envs/lerobot/bin/python3}"
 export PORT="${PORT:-43127}"
 export ENABLE_CAMERA="${ENABLE_CAMERA:-1}"
-export CAMERA_FPS="${CAMERA_FPS:-15}"
+export CAMERA_FPS="${CAMERA_FPS:-30}"
 export STREAM_FPS="${STREAM_FPS:-0}"
 HTTPS_CERT="${HTTPS_CERT:-}"
 HTTPS_KEY="${HTTPS_KEY:-}"
@@ -16,6 +16,32 @@ HTTPS_KEY="${HTTPS_KEY:-}"
 echo "=== SO-101 遥操作一键启动 ==="
 echo "Python: $PYTHON_PATH"
 echo "摄像头: 自动检测 USB 摄像头 ($CAMERA_FPS FPS)"
+
+# 清理上次异常退出后仍占用服务端口的进程。
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    echo "错误: PORT 必须是 1-65535 之间的整数: $PORT"
+    exit 1
+fi
+
+PORT_PIDS="$(lsof -t -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
+if [ -n "$PORT_PIDS" ]; then
+    echo "清理端口 $PORT 上的旧进程: $PORT_PIDS"
+    kill $PORT_PIDS 2>/dev/null || true
+
+    for _ in $(seq 1 20); do
+        if ! lsof -t -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.1
+    done
+
+    PORT_PIDS="$(lsof -t -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
+    if [ -n "$PORT_PIDS" ]; then
+        echo "旧进程未正常退出，强制清理: $PORT_PIDS"
+        kill -9 $PORT_PIDS 2>/dev/null || true
+    fi
+fi
+
 if [ -n "$HTTPS_CERT" ] || [ -n "$HTTPS_KEY" ]; then
     if [ ! -f "$HTTPS_CERT" ] || [ ! -f "$HTTPS_KEY" ]; then
         echo "错误: HTTPS_CERT 或 HTTPS_KEY 文件不存在"
@@ -74,6 +100,12 @@ cd "$DIR/robot-server"
 npm run dev &
 BACKEND_PID=$!
 
+cleanup() {
+    kill "$BACKEND_PID" 2>/dev/null || true
+    wait "$BACKEND_PID" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
 # 等待后端就绪
 echo -n "      等待后端就绪"
 for i in $(seq 1 20); do
@@ -101,5 +133,4 @@ echo "========================================"
 echo ""
 
 cd "$DIR/frontend"
-trap "kill $BACKEND_PID 2>/dev/null; exit 0" INT TERM
 npm run dev

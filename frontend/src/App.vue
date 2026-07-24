@@ -1,5 +1,27 @@
 <template>
   <div class="app-shell">
+    <div v-if="selfCheckVisible" class="self-check-overlay" role="dialog" aria-modal="true" aria-labelledby="self-check-title">
+      <div class="self-check-modal">
+        <div class="self-check-heading">
+          <div><p class="eyebrow">SYSTEM DIAGNOSTICS</p><h2 id="self-check-title">启动自检</h2></div>
+          <span :class="['self-check-state', selfCheckRunning ? 'checking' : selfCheckPassed ? 'ok' : 'warn']">{{ selfCheckRunning ? "检查中" : selfCheckPassed ? "全部正常" : "需要检查" }}</span>
+        </div>
+        <div v-if="selfCheckRunning" class="self-check-loading">
+          <span class="spinner"></span>
+          <div><strong>正在执行启动自检</strong><small>检查服务器、Follower 串口、标定文件和摄像头画面</small></div>
+          <span class="loading-dots"><i></i><i></i><i></i></span>
+        </div>
+        <div v-else-if="selfCheck?.server?.ok" class="self-check-results">
+          <p :class="selfCheck?.server?.ok ? 'ok' : 'bad'">{{ selfCheck?.server?.ok ? '✓ Robot Server 正常' : '✕ Robot Server 无响应' }}</p>
+          <p :class="selfCheck?.follower?.portPresent ? 'ok' : 'bad'">{{ selfCheck?.follower?.portPresent ? `✓ 检测到 ACM 串口 (${selfCheck.follower.ports.join(', ')})` : '✕ 未检测到任何 /dev/ttyACM* 串口' }}</p>
+          <p :class="selfCheck?.follower?.calibrationValid ? 'ok' : 'warn'">{{ selfCheck?.follower?.calibrationValid ? `✓ Follower 标定有效 (${selfCheck.follower.id})` : `! Follower 标定缺失或无效 (${selfCheck?.follower?.id || '-'})` }}</p>
+          <p v-for="(camera, index) in selfCheck?.cameras || []" :key="index" :class="camera.frameFresh ? 'ok' : 'bad'">{{ camera.frameFresh ? `✓ 摄像头 ${index + 1} 正常 (/dev/video${camera.index})` : `✕ 摄像头 ${index + 1} 无画面${camera.index >= 0 ? ` (/dev/video${camera.index})` : ''}` }}</p>
+        </div>
+        <div v-else class="self-check-results"><p class="bad">✕ Robot Server 自检接口无响应</p><p class="self-check-error">{{ selfCheck?.server?.error || '请重启 start_robot.sh 后重试' }}</p></div>
+        <p class="self-check-note">机械臂检查仅确认串口与标定，不会上扭矩或移动关节。</p>
+        <div class="self-check-actions"><button class="secondary" :disabled="selfCheckRunning" @click="runSelfCheck()">重新检查</button><button class="primary" :disabled="selfCheckRunning" @click="selfCheckVisible = false">进入控制台</button></div>
+      </div>
+    </div>
     <header class="header">
       <div class="brand">
         <span class="brand-mark">SO</span>
@@ -8,7 +30,7 @@
           <h1>SO-101 控制台</h1>
         </div>
       </div>
-      <StatusBar :connected="connected" :running="running" />
+      <StatusBar :connected="connected" :running="running" :metrics="metrics" />
     </header>
 
     <main class="main">
@@ -44,7 +66,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { computed, ref, onMounted, watch } from "vue";
 import { useWebSocket } from "./composables/useWebSocket";
 import StatusBar from "./components/StatusBar.vue";
 import ControlPanel from "./components/ControlPanel.vue";
@@ -61,16 +83,66 @@ const {
   cameraFrame,
   camera2Frame,
   logs,
+  metrics,
   log,
   send,
 } = useWebSocket();
-const { connected: serialConnected, error: serialError, connect: connectLeader, disconnect: disconnectLeader } = useLeaderSerial(send, log);
+const { connected: serialConnected, error: serialError, connect: connectLeader, disconnect: disconnectLeader } = useLeaderSerial(send, log, stopAfterLeaderFailure);
 
 const ports = ref<string[]>([]);
 const cameras = ref<{ index: number; path: string }[]>([]);
 const detectedCameras = ref<number[]>([]);
 const activeCameras = ref<{ camera: number; camera2: number }>({ camera: -1, camera2: -1 });
 const actionPending = ref(false);
+const selfCheckRunning = ref(false);
+const selfCheck = ref<Record<string, any> | null>(null);
+const selfCheckVisible = ref(true);
+const selfCheckPassed = computed(() => Boolean(selfCheck.value?.server?.ok
+  && selfCheck.value?.follower?.portPresent
+  && selfCheck.value?.follower?.calibrationValid
+  && selfCheck.value?.cameras?.length >= 2
+  && selfCheck.value.cameras.every((camera: Record<string, any>) => camera.frameFresh)));
+
+async function runSelfCheck(config?: { followerId?: string }) {
+  if (selfCheckRunning.value) return;
+  selfCheckVisible.value = true;
+  selfCheckRunning.value = true;
+  const minimumAnimation = new Promise<void>((resolve) => window.setTimeout(resolve, 2500));
+  try {
+    const params = new URLSearchParams({
+      follower_id: config?.followerId || "R12253102",
+    });
+    const res = await fetch(`/api/self-check?${params}`);
+    const contentType = res.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      throw new Error("自检接口返回了网页内容；请重启 start_robot.sh 以加载新版 Robot Server");
+    }
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.error || `HTTP ${res.status}`);
+    await minimumAnimation;
+    selfCheck.value = result;
+    log("启动自检完成");
+  } catch (cause) {
+    await minimumAnimation;
+    selfCheck.value = { server: { ok: false, error: String(cause) } };
+    log(`启动自检失败: ${cause}`);
+  } finally {
+    selfCheckRunning.value = false;
+  }
+}
+
+async function stopAfterLeaderFailure() {
+  if (!running.value) return;
+  log("Leader 已断开，正在安全停止后端遥操作...");
+  try {
+    const res = await fetch("/api/stop", { method: "POST" });
+    const data = await res.json();
+    if (data.ok || data.error === "未在运行") log("后端遥操作已安全停止");
+    else log(`后端停止失败: ${data.error}`);
+  } catch (cause) {
+    log(`后端停止请求失败: ${cause}`);
+  }
+}
 
 async function fetchPorts() {
   try {
@@ -168,7 +240,17 @@ async function handleStop() {
   }
 }
 
-onMounted(() => fetchPorts());
+watch(running, async (isRunning, wasRunning) => {
+  if (wasRunning && !isRunning && serialConnected.value) {
+    await disconnectLeader();
+    log("后端遥操作已停止，Leader COM 已自动断开");
+  }
+});
+
+onMounted(async () => {
+  await fetchPorts();
+  await runSelfCheck();
+});
 </script>
 
 <style>
@@ -190,6 +272,34 @@ body {
     radial-gradient(circle at 0% 100%, rgba(78, 85, 206, 0.16), transparent 34rem),
     #09111f;
 }
+.self-check-overlay { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 20px; background: rgba(2, 8, 16, .82); backdrop-filter: blur(8px); }
+.self-check-modal { width: min(480px, 100%); padding: 24px; border: 1px solid rgba(119, 188, 225, .25); border-radius: 18px; background: #0d1c2e; box-shadow: 0 24px 80px rgba(0, 0, 0, .5); }
+.self-check-heading { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-bottom: 20px; }
+.self-check-heading h2 { margin-top: 3px; font-size: 22px; }
+.self-check-state { padding: 5px 9px; border-radius: 99px; font: 10px ui-monospace, monospace; background: #172b40; }
+.self-check-state.ok, .self-check-results .ok { color: #69d7a3; }
+.self-check-state.warn, .self-check-results .warn { color: #f3c969; }
+.self-check-state.checking { color: #76cdec; }
+.self-check-results { display: grid; gap: 9px; padding: 15px; border-radius: 10px; background: rgba(4, 12, 22, .55); }
+.self-check-results p { font-size: 13px; }
+.self-check-results .bad { color: #ff9aaa; }
+.self-check-results .self-check-error { color: #718da3; font: 10px/1.4 ui-monospace, monospace; word-break: break-word; }
+.self-check-loading { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 13px; min-height: 150px; padding: 20px; color: #92aec4; font-size: 13px; }
+.self-check-loading strong { display: block; color: #c7ddeb; font-size: 14px; }
+.self-check-loading small { display: block; margin-top: 5px; color: #6f8da3; font-size: 10px; line-height: 1.4; }
+.spinner { width: 28px; height: 28px; border: 3px solid #29465f; border-top-color: #72d2f2; border-radius: 50%; animation: self-check-spin .8s linear infinite; box-shadow: 0 0 14px rgba(114, 210, 242, .16); }
+.loading-dots { display: flex; align-items: center; gap: 4px; }
+.loading-dots i { width: 5px; height: 5px; border-radius: 50%; background: #72d2f2; animation: self-check-pulse 1s ease-in-out infinite; }
+.loading-dots i:nth-child(2) { animation-delay: .15s; }
+.loading-dots i:nth-child(3) { animation-delay: .3s; }
+.self-check-note { margin-top: 13px; color: #718da3; font-size: 10px; }
+.self-check-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }
+.self-check-actions button { padding: 9px 14px; border: 0; border-radius: 8px; cursor: pointer; font-weight: 600; }
+.self-check-actions button:disabled { opacity: .45; cursor: default; }
+.self-check-actions .secondary { color: #91bad2; background: #142b40; }
+.self-check-actions .primary { color: #06101a; background: #64d6f4; }
+@keyframes self-check-spin { to { transform: rotate(360deg); } }
+@keyframes self-check-pulse { 0%, 100% { opacity: .25; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
 .header {
   max-width: 1560px;
   margin: 0 auto;

@@ -11,7 +11,8 @@ import cv2
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--camera-index", type=int, default=0)
-    p.add_argument("--fps", type=int, default=15)
+    p.add_argument("--fps", type=int, default=30)
+    p.add_argument("--jpeg-quality", type=int, default=75)
     args = p.parse_args()
 
     cap = cv2.VideoCapture(args.camera_index, cv2.CAP_V4L2)
@@ -24,13 +25,15 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, args.fps)
+    # 只保留最新帧，避免 USB 或编码短暂停顿后继续播放缓存中的旧画面。
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     interval = 1.0 / max(1, args.fps)
     try:
         while True:
             started = time.monotonic()
             ok, frame = cap.read()
             if ok and frame is not None and frame.shape[0] > 0 and frame.shape[1] > 0:
-                ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality])
                 if ok:
                     print(json.dumps({"type": "camera_frame", "data": base64.b64encode(jpeg).decode("ascii"), "ts": time.time()}), flush=True)
             time.sleep(max(0, interval - (time.monotonic() - started)))

@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { createLogger, defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import fs from "node:fs";
 
@@ -10,7 +10,19 @@ const https = certPath && keyPath && fs.existsSync(certPath) && fs.existsSync(ke
   ? { cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) }
   : undefined;
 
+const logger = createLogger();
+const logError = logger.error.bind(logger);
+logger.error = (message, options) => {
+  const detail = `${message}\n${options?.error instanceof Error ? options.error.stack || options.error.message : ""}`;
+  const closedWebSocket = detail.includes("ws proxy socket error")
+    && (detail.includes("socket has been ended by the other party")
+      || detail.includes("writeAfterFIN")
+      || detail.includes("ERR_STREAM_WRITE_AFTER_END"));
+  if (!closedWebSocket) logError(message, options);
+};
+
 export default defineConfig({
+  customLogger: logger,
   plugins: [vue()],
   server: {
     host: "0.0.0.0",
