@@ -5,6 +5,7 @@ import cors from "cors";
 import path from "path";
 import fs from "fs";
 import os from "os";
+import crypto from "crypto";
 import { execSync, execFile, spawn, ChildProcess } from "child_process";
 import { RobotBridge, BridgeMessage } from "./robotBridge";
 import { MJPEGStreamManager } from "./streams";
@@ -339,6 +340,14 @@ interface TrainingJob {
   exitCode: number | null;
   error: string | null;
   logs: string[];
+  archivedAt?: string | null;
+}
+
+interface PreflightCheck {
+  id: string;
+  label: string;
+  status: "pass" | "warning" | "fail";
+  detail: string;
 }
 
 const trainingProcesses = new Map<string, ChildProcess>();
@@ -417,7 +426,17 @@ function jobOutputPath(job: TrainingJob): string | null {
   return output.startsWith(outputs + path.sep) ? output : null;
 }
 
-function trainingCheckpoints(job: TrainingJob): Array<{ step: number; name: string; path: string; configPath: string; modifiedAt: string }> {
+function directorySize(directory: string): number {
+  let size = 0;
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) size += directorySize(target);
+    else if (entry.isFile()) size += fs.statSync(target).size;
+  }
+  return size;
+}
+
+function trainingCheckpoints(job: TrainingJob): Array<{ step: number; name: string; path: string; configPath: string; modelPath: string | null; sizeBytes: number; modifiedAt: string }> {
   const output = jobOutputPath(job);
   if (!output) return [];
   const directory = path.join(output, "checkpoints");
@@ -427,14 +446,60 @@ function trainingCheckpoints(job: TrainingJob): Array<{ step: number; name: stri
       .map((entry) => {
         const checkpointPath = path.join(directory, entry.name);
         const configPath = path.join(checkpointPath, "pretrained_model", "train_config.json");
+        const modelPath = path.join(checkpointPath, "pretrained_model", "model.safetensors");
         if (!fs.existsSync(configPath)) return null;
-        return { step: Number(entry.name), name: entry.name, path: checkpointPath, configPath, modifiedAt: fs.statSync(checkpointPath).mtime.toISOString() };
+        return { step: Number(entry.name), name: entry.name, path: checkpointPath, configPath, modelPath: fs.existsSync(modelPath) ? modelPath : null, sizeBytes: directorySize(checkpointPath), modifiedAt: fs.statSync(checkpointPath).mtime.toISOString() };
       })
       .filter((item): item is NonNullable<typeof item> => item !== null)
       .sort((a, b) => b.step - a.step);
   } catch {
     return [];
   }
+}
+
+function runPythonCheck(script: string): Promise<{ ok: boolean; output: string }> {
+  return new Promise((resolve) => execFile(PYTHON_PATH, ["-c", script], { timeout: 15000 }, (error, stdout, stderr) => {
+    resolve({ ok: !error, output: (stdout || stderr || error?.message || "").trim() });
+  }));
+}
+
+async function trainingPreflight(job: TrainingJob): Promise<{ ready: boolean; checks: PreflightCheck[]; checkedAt: string }> {
+  const checks: PreflightCheck[] = [];
+  const datasetRoot = datasetPath(job.dataset);
+  const collectionPath = path.join(collectionsDirectory(datasetRoot), `${job.collection}.json`);
+  const datasetReady = fs.existsSync(datasetRoot) && fs.existsSync(collectionPath);
+  checks.push({ id: "dataset", label: "训练数据", status: datasetReady ? "pass" : "fail", detail: datasetReady ? `${job.episodes.length} 个已发布 Episode 可用` : "数据集或训练选集已不存在" });
+
+  const python = await runPythonCheck("import lerobot,torch; print(torch.__version__)");
+  checks.push({ id: "runtime", label: "LeRobot 运行环境", status: python.ok ? "pass" : "fail", detail: python.ok ? `PyTorch ${python.output}` : python.output || "无法导入 lerobot/torch" });
+
+  const cuda = await runPythonCheck("import torch; print(torch.cuda.is_available())");
+  const cudaAvailable = cuda.ok && cuda.output.split(/\s+/).pop() === "True";
+  checks.push({ id: "device", label: "计算设备", status: job.device === "cpu" || cudaAvailable ? "pass" : "fail", detail: job.device === "cpu" ? "使用 CPU（适合流程验证）" : cudaAvailable ? "CUDA 可用" : "任务要求 CUDA，但当前 PyTorch 无 CUDA" });
+
+  if (["pi0", "pi0-fast"].includes(job.policy)) {
+    const dependency = await runPythonCheck("import transformers,peft; print('lerobot[pi] ready')");
+    checks.push({ id: "policy_dependency", label: "Pi0 依赖", status: dependency.ok ? "pass" : "fail", detail: dependency.ok ? dependency.output : "缺少 Pi0 依赖，请安装 lerobot[pi]" });
+  } else if (job.policy === "smolvla") {
+    const dependency = await runPythonCheck("import transformers; print('SmolVLA ready')");
+    checks.push({ id: "policy_dependency", label: "SmolVLA 依赖", status: dependency.ok ? "pass" : "fail", detail: dependency.ok ? dependency.output : "缺少 SmolVLA 依赖，请安装 lerobot[smolvla]" });
+  }
+
+  const resources = resourceSample() as { diskFreeGb: number; memoryUsedGb: number };
+  const memoryFreeGb = (os.totalmem() - os.freemem()) / 1024 ** 3;
+  checks.push({ id: "disk", label: "磁盘空间", status: resources.diskFreeGb >= 5 ? "pass" : resources.diskFreeGb >= 2 ? "warning" : "fail", detail: `可用 ${resources.diskFreeGb} GB，建议至少保留 5 GB` });
+  checks.push({ id: "memory", label: "可用内存", status: memoryFreeGb >= 2 ? "pass" : memoryFreeGb >= 1 ? "warning" : "fail", detail: `可用 ${memoryFreeGb.toFixed(1)} GB` });
+  return { ready: !checks.some((check) => check.status === "fail"), checks, checkedAt: new Date().toISOString() };
+}
+
+function fileSha256(file: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = fs.createReadStream(file);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
 }
 
 function enrichTrainingJob(job: TrainingJob): TrainingJob & { metrics: TrainingMetric[]; progress: number; checkpoints: ReturnType<typeof trainingCheckpoints> } {
@@ -809,7 +874,8 @@ app.get("/api/training/jobs", (req, res) => {
     }
   }
   if (changed) writeTrainingJobs(jobs);
-  res.json({ ok: true, jobs: jobs.map(enrichTrainingJob) });
+  const includeArchived = req.query.archived === "true";
+  res.json({ ok: true, jobs: jobs.filter((job) => includeArchived || !job.archivedAt).map(enrichTrainingJob) });
 });
 
 app.post("/api/training/jobs", (req, res) => {
@@ -871,8 +937,60 @@ app.post("/api/training/jobs/:job/start", (req, res) => {
   if (!job) { res.status(404).json({ ok: false, error: "找不到训练任务" }); return; }
   if (job.state !== "draft" && job.state !== "failed") { res.status(409).json({ ok: false, error: "只有草稿或失败任务可以启动" }); return; }
   if (job.state === "failed" && fs.existsSync(job.outputDir)) { res.status(409).json({ ok: false, error: "失败任务已有输出，请新建任务或使用 Checkpoint 续训" }); return; }
-  try { startTrainingJob(job); res.json({ ok: true, job }); }
-  catch (error) { res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+  void trainingPreflight(job).then((preflight) => {
+    if (!preflight.ready) { res.status(409).json({ ok: false, error: "启动前检查未通过", preflight }); return; }
+    try { startTrainingJob(job); res.json({ ok: true, job, preflight }); }
+    catch (error) { res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error), preflight }); }
+  }).catch((error) => res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+});
+
+app.get("/api/training/jobs/:job/preflight", async (req, res) => {
+  const job = readTrainingJobs().find((item) => item.id === req.params.job);
+  if (!job) { res.status(404).json({ ok: false, error: "找不到训练任务" }); return; }
+  try { res.json({ ok: true, ...await trainingPreflight(job) }); }
+  catch (error) { res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/training/jobs/:job/clone", (req, res) => {
+  const source = readTrainingJobs().find((item) => item.id === req.params.job);
+  if (!source) { res.status(404).json({ ok: false, error: "找不到训练任务" }); return; }
+  const id = `train-${Date.now().toString(36)}`;
+  const outputDir = path.join(TRAINING_ROOT, "outputs", id);
+  const command = [
+    "-m", "lerobot.scripts.lerobot_train",
+    `--dataset.repo_id=local/${source.dataset}`,
+    `--dataset.root=${datasetPath(source.dataset)}`,
+    `--dataset.episodes=[${source.episodes.join(",")}]`,
+    `--policy.type=${source.policy}`,
+    `--output_dir=${outputDir}`,
+    `--job_name=${source.name} copy`,
+    `--policy.device=${source.device}`,
+    "--policy.push_to_hub=false", "--wandb.enable=false",
+    `--batch_size=${source.batchSize}`, `--steps=${source.steps}`,
+    `--log_freq=${source.logFreq ?? 200}`, `--save_freq=${source.saveFreq ?? Math.min(20000, source.steps)}`,
+    `--num_workers=${source.numWorkers ?? 4}`, `--seed=${source.seed ?? 1000}`,
+  ];
+  const cloned: TrainingJob = { ...source, id, name: `${source.name} copy`, state: "draft", createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, outputDir, command, exitCode: null, error: null, logs: [], attempts: 0, archivedAt: null };
+  const jobs = readTrainingJobs(); jobs.unshift(cloned); writeTrainingJobs(jobs);
+  res.status(201).json({ ok: true, job: enrichTrainingJob(cloned) });
+});
+
+app.post("/api/training/jobs/:job/archive", (req, res) => {
+  const job = readTrainingJobs().find((item) => item.id === req.params.job);
+  if (!job) { res.status(404).json({ ok: false, error: "找不到训练任务" }); return; }
+  if (["running", "stopping"].includes(job.state)) { res.status(409).json({ ok: false, error: "运行中的任务不能归档" }); return; }
+  const archived = req.body?.archived !== false;
+  const updated = updateTrainingJob(job.id, (current) => { current.archivedAt = archived ? new Date().toISOString() : null; });
+  res.json({ ok: true, job: updated ? enrichTrainingJob(updated) : null });
+});
+
+app.get("/api/training/jobs/:job/checkpoints/:checkpoint/integrity", async (req, res) => {
+  const job = readTrainingJobs().find((item) => item.id === req.params.job);
+  const checkpoint = job && trainingCheckpoints(job).find((item) => item.name === req.params.checkpoint);
+  if (!job || !checkpoint) { res.status(404).json({ ok: false, error: "找不到 Checkpoint" }); return; }
+  if (!checkpoint.modelPath) { res.status(404).json({ ok: false, error: "Checkpoint 中没有 model.safetensors" }); return; }
+  try { res.json({ ok: true, algorithm: "sha256", hash: await fileSha256(checkpoint.modelPath), file: path.basename(checkpoint.modelPath), sizeBytes: fs.statSync(checkpoint.modelPath).size }); }
+  catch (error) { res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
 });
 
 app.post("/api/training/jobs/:job/stop", (req, res) => {
@@ -890,13 +1008,16 @@ app.post("/api/training/jobs/:job/resume", (req, res) => {
   if (!["failed", "cancelled"].includes(job.state)) { res.status(409).json({ ok: false, error: "只有失败或已停止的任务可以续训" }); return; }
   const checkpoint = trainingCheckpoints(job)[0];
   if (!checkpoint) { res.status(409).json({ ok: false, error: "没有可用 Checkpoint，无法续训" }); return; }
-  try {
-    job.command = ["-m", "lerobot.scripts.lerobot_train", `--config_path=${checkpoint.configPath}`, "--resume=true"];
-    startTrainingJob(job);
-    res.json({ ok: true, job: enrichTrainingJob(job) });
-  } catch (error) {
-    res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
-  }
+  void trainingPreflight(job).then((preflight) => {
+    if (!preflight.ready) { res.status(409).json({ ok: false, error: "启动前检查未通过", preflight }); return; }
+    try {
+      job.command = ["-m", "lerobot.scripts.lerobot_train", `--config_path=${checkpoint.configPath}`, "--resume=true"];
+      startTrainingJob(job);
+      res.json({ ok: true, job: enrichTrainingJob(job), preflight });
+    } catch (error) {
+      res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error), preflight });
+    }
+  }).catch((error) => res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) }));
 });
 
 app.post("/api/recording/start", (req, res) => {
