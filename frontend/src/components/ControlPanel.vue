@@ -85,7 +85,7 @@
       {{ busy && running ? "正在停止…" : "停止遥操作" }}
     </button>
 
-    <p class="hint">MuJoCo 仿真已关闭，仅运行真实机器人控制和摄像头。</p>
+    <p class="hint">仿真功能已关闭，仅运行真实机器人控制和摄像头。</p>
   </div>
 </template>
 

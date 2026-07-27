@@ -58,4 +58,10 @@ const formatLatency = (value: number | null) => value === null ? "-- ms" : `${va
   color: #888;
 }
 @media (max-width: 900px) { .status-bar { justify-content: flex-start; } }
+@media (max-width: 560px) {
+  .status-bar { width: 100%; gap: 7px; }
+  .status-text { font-size: 10px; }
+  .metrics { justify-content: flex-start; gap: 4px; }
+  .metrics span { padding: 3px 5px; font-size: 8px; }
+}
 </style>

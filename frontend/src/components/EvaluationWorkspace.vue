@@ -1,7 +1,7 @@
 <template>
   <div class="evaluation-layout">
     <section class="evaluation-config" aria-label="新建模型评估任务">
-      <div class="pane-heading"><div><p class="eyebrow">NEW EVALUATION</p><h3>新建评估</h3></div><span>实时推理录制</span></div>
+      <div class="pane-heading"><div><h3>新建评估</h3></div><span>实时推理录制</span></div>
       <div v-if="!models.length" class="notice">请先从已完成训练的 Checkpoint 登记模型。</div>
       <div class="form-grid">
         <label>评估名称<input v-model.trim="form.name" maxlength="80" placeholder="eval_pick_place_v1" /></label>
@@ -19,14 +19,14 @@
     </section>
 
     <section class="evaluation-jobs" aria-label="模型评估任务列表">
-      <div class="pane-heading"><div><p class="eyebrow">EVALUATIONS</p><h3>评估任务</h3></div><span>{{ runningJobs }} 运行中 / {{ jobs.length }} 总计</span></div>
+      <div class="pane-heading"><div><h3>评估任务</h3></div><span>{{ runningJobs }} 运行中 / {{ jobs.length }} 总计</span></div>
       <div v-if="jobs.length" class="job-list"><button v-for="job in jobs" :key="job.id" :class="{ active: selectedJob?.id === job.id }" @click="selectedId = job.id"><i :class="job.state"></i><span><strong>{{ job.name }}</strong><small>{{ job.modelName }} v{{ job.modelVersion }} · {{ job.evalDataset }}</small></span><em :class="job.state">{{ evaluationState(job.state) }}</em></button></div>
       <div v-else class="empty">尚无评估任务</div>
     </section>
 
     <section class="evaluation-detail" aria-label="模型评估详情">
       <template v-if="selectedJob">
-        <div class="job-title"><div><p class="eyebrow">{{ selectedJob.id }}</p><h3>{{ selectedJob.name }}</h3></div><span :class="['job-state', selectedJob.state]">{{ evaluationState(selectedJob.state) }}</span></div>
+        <div class="job-title"><div><h3>{{ selectedJob.name }}</h3></div><span :class="['job-state', selectedJob.state]">{{ evaluationState(selectedJob.state) }}</span></div>
         <div class="facts"><span>{{ selectedJob.modelName }} v{{ selectedJob.modelVersion }}</span><span>{{ selectedJob.device.toUpperCase() }}</span><span>{{ selectedJob.numEpisodes }} Episodes</span><span>{{ selectedJob.episodeTime }}s / Episode</span></div>
         <dl><div><dt>评估 Dataset</dt><dd>{{ selectedJob.evalDataset }}</dd></div><div><dt>任务描述</dt><dd>{{ selectedJob.task }}</dd></div><div><dt>输出目录</dt><dd>{{ selectedJob.outputDatasetPath }}</dd></div><div><dt>设备映射</dt><dd>{{ selectedJob.followerPort }} / {{ selectedJob.leaderPort }} · video{{ selectedJob.cameraIndices[0] }} / video{{ selectedJob.cameraIndices[1] }}</dd></div></dl>
         <div class="actions"><button v-if="selectedJob.state === 'draft'" class="secondary" @click="deleteEvaluation(selectedJob.id)">删除草稿</button><button v-if="['draft','failed','cancelled'].includes(selectedJob.state)" :disabled="checking || runningJobs > 0" @click="startEvaluation(selectedJob.id)">▶ 启动评估</button><button v-if="selectedJob.state === 'running'" class="stop" @click="stopEvaluation(selectedJob.id)">■ 停止</button></div>
@@ -45,7 +45,7 @@
             <div class="result-layout">
               <div class="result-list"><button v-for="episode in results.episodes" :key="episode.episode" :class="{ active: selectedResultEpisode?.episode === episode.episode }" @click="selectResultEpisode(episode)"><span>#{{ String(episode.episode).padStart(3, '0') }}</span><small>{{ episode.tasks.join(" / ") || "未命名任务" }}</small><em :class="episode.outcome.status">{{ outcomeText(episode.outcome.status) }}</em></button></div>
               <section v-if="selectedResultEpisode" class="result-editor">
-                <div class="result-head"><div><strong>Episode {{ selectedResultEpisode.episode }}</strong><small>{{ selectedResultEpisode.frames }} 帧 · {{ selectedResultEpisode.duration.toFixed(1) }}s</small></div><span :class="selectedResultEpisode.dataReview.status">数据审核：{{ dataReviewText(selectedResultEpisode.dataReview.status) }}</span></div>
+                <div class="result-head"><div><strong>片段 {{ selectedResultEpisode.episode }}</strong><small>{{ selectedResultEpisode.frames }} 帧 · {{ selectedResultEpisode.duration.toFixed(1) }} 秒</small></div><span :class="selectedResultEpisode.dataReview.status">数据审核：{{ dataReviewText(selectedResultEpisode.dataReview.status) }}</span></div>
                 <div class="result-videos"><video v-for="(source, camera) in selectedResultEpisode.videos" :key="camera" :src="source" controls preload="metadata"></video></div>
                 <div class="outcome-form"><label>任务结果<select v-model="outcomeEdit.status"><option value="unreviewed">待审核</option><option value="success">成功</option><option value="failure">失败</option><option value="invalid">无效数据</option></select></label><label v-if="['failure','invalid'].includes(outcomeEdit.status)">失败原因<select v-model="outcomeEdit.failureReason"><option value="">选择原因</option><option v-for="reason in failureReasons" :key="reason.value" :value="reason.value">{{ reason.label }}</option></select></label><label>审核人<input v-model.trim="outcomeEdit.reviewer" maxlength="80" /></label><label class="notes">备注<textarea v-model.trim="outcomeEdit.notes" rows="2" maxlength="2000"></textarea></label></div>
                 <div class="save-result"><span>{{ resultSavedMessage }}</span><button :disabled="savingResult || (outcomeEdit.status === 'failure' && !outcomeEdit.failureReason)" @click="saveOutcome">{{ savingResult ? "保存中…" : "保存判定" }}</button></div>

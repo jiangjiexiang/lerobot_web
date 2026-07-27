@@ -1,7 +1,7 @@
 <template>
   <main class="workspace">
     <header class="workspace-head">
-      <div><p class="eyebrow">DATA OPERATIONS</p><h2>数据管理</h2></div>
+      <div><h2>数据管理</h2></div>
       <button class="icon-button" title="刷新数据目录" :disabled="loading" @click="loadDatasets">↻</button>
     </header>
 
@@ -74,7 +74,7 @@
         </div>
         <template v-if="detailView === 'episode' && selectedEpisode">
         <div class="review-head">
-          <div><p class="eyebrow">EPISODE {{ String(selectedEpisode.episode).padStart(3, "0") }}</p><h3>{{ selectedEpisode.tasks.join(" / ") || "未命名任务" }}</h3></div>
+          <div><p class="eyebrow">片段 {{ String(selectedEpisode.episode).padStart(3, "0") }}</p><h3>{{ selectedEpisode.tasks.join(" / ") || "未命名任务" }}</h3></div>
           <div class="episode-facts"><span>{{ selectedEpisode.frames }} 帧</span><span>{{ selectedDataset?.fps }} FPS</span><span>{{ formatDuration(selectedEpisode.duration) }}</span></div>
         </div>
 
@@ -108,7 +108,7 @@
         </template>
 
         <section v-else-if="detailView === 'collections'" class="collections-pane">
-          <header><div><p class="eyebrow">TRAINING COLLECTIONS</p><h3>训练选集</h3></div><span>{{ approvedCount }} 个 Episode 已通过</span></header>
+          <header><div><h3>训练选集</h3></div><span>{{ approvedCount }} 个 Episode 已通过</span></header>
           <div class="publish-box">
             <label>版本名称<input v-model="collectionName" placeholder="例如：抓取任务基线集" /></label>
             <button :disabled="saving || approvedCount === 0" @click="publishCollection">发布已通过数据</button>
@@ -119,14 +119,14 @@
               <div><strong>{{ item.id }} · {{ item.name }}</strong><small>{{ formatDate(item.createdAt) }} · {{ item.episodes.length }} Episodes</small></div>
               <span class="published">已发布</span>
               <a :href="`/api/datasets/${encodeURIComponent(selectedDataset.name)}/collections/${item.id}/manifest`" title="下载训练选集 manifest">下载 manifest</a>
-              <p>Episode {{ item.episodes.map((episode) => episode.episode).join(", ") }}</p>
+              <p>片段 {{ item.episodes.map((episode) => episode.episode).join(", ") }}</p>
             </article>
           </div>
           <div v-else class="no-results">尚未发布训练选集</div>
         </section>
 
         <section v-else class="audit-pane">
-          <header><div><p class="eyebrow">AUDIT LOG</p><h3>操作记录</h3></div><span>最近 {{ auditEntries.length }} 条</span></header>
+          <header><div><h3>操作记录</h3></div><span>最近 {{ auditEntries.length }} 条</span></header>
           <div v-if="auditEntries.length" class="audit-list">
             <article v-for="(entry, index) in auditEntries" :key="`${entry.at}-${index}`">
               <span class="audit-action">{{ auditAction(entry.action) }}</span>

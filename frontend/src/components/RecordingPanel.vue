@@ -1,7 +1,7 @@
 <template>
   <div class="recording-panel">
     <div class="heading">
-      <div><p class="kicker">DATA CAPTURE</p><h2>数据集录制</h2></div>
+      <div><h2>数据集录制</h2></div>
       <span class="state" :class="recording.state"><i></i>{{ stateText }}</span>
     </div>
 
@@ -21,7 +21,7 @@
       <label class="resume"><input v-model="form.resume" type="checkbox" /> 续录到已有同名数据集</label>
       <p class="camera-note">双摄像头应连接不同 USB HUB · MJPG 640×360@30 FPS</p>
       <p v-if="recording.error" class="error">{{ recording.error }}</p>
-      <p v-else-if="recording.path && recording.frames" class="saved">Episode {{ recording.episode ?? "-" }} 已保存 · {{ recording.frames }} 帧</p>
+      <p v-else-if="recording.path && recording.frames" class="saved">片段 {{ recording.episode ?? "-" }} 已保存 · {{ recording.frames }} 帧</p>
       <button class="record" :disabled="!running || busy || !valid" @click="$emit('start', { ...form })"><span>●</span>开始录制</button>
     </template>
 

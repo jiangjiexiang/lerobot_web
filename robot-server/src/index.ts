@@ -841,8 +841,8 @@ async function trainingPreflight(job: TrainingJob): Promise<{ ready: boolean; ch
     checks.push({ id: "policy_dependency", label: "SmolVLA 依赖", status: dependency.ok ? "pass" : "fail", detail: dependency.ok ? dependency.output : "缺少 SmolVLA 依赖，请安装 lerobot[smolvla]" });
   }
 
-  const resources = resourceSample() as { diskFreeGb: number; memoryUsedGb: number };
-  const memoryFreeGb = (os.totalmem() - os.freemem()) / 1024 ** 3;
+  const resources = resourceSample() as { diskFreeGb: number };
+  const memoryFreeGb = os.freemem() / 1024 ** 3;
   const estimate = estimateTrainingResources(job);
   checks.push({ id: "disk", label: "磁盘空间", status: resources.diskFreeGb >= 5 ? "pass" : resources.diskFreeGb >= 2 ? "warning" : "fail", detail: `可用 ${resources.diskFreeGb} GB，建议至少保留 5 GB` });
   checks.push({ id: "memory", label: "可用内存", status: memoryFreeGb >= estimate.systemMemoryGb ? "pass" : memoryFreeGb >= estimate.systemMemoryGb * .75 ? "warning" : "fail", detail: `可用 ${memoryFreeGb.toFixed(1)} GB · 预计需要 ${estimate.systemMemoryGb} GB` });

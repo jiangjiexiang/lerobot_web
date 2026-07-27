@@ -28,11 +28,11 @@ const props = withDefaults(defineProps<{
   waitText?: string;
 }>(), {
   kicker: "实时镜像",
-  title: "MuJoCo 仿真画面",
+  title: "仿真画面",
   placeholder: "等待遥操作画面…",
   hint: "启动后将在这里实时显示从臂姿态",
-  liveText: "LIVE",
-  waitText: "WAITING",
+  liveText: "实时",
+  waitText: "等待",
 });
 
 const fallbackLoaded = ref(false);
@@ -40,6 +40,7 @@ const hasImage = computed(() => Boolean(props.frame) || fallbackLoaded.value);
 </script>
 
 <style scoped>
+.mujoco-view { min-width: 0; container-type: inline-size; }
 .view-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
 .kicker { color: #6db8d7; font-size: 10px; font-weight: 700; letter-spacing: 1.2px; }
 h2 { font-size: 18px; margin-top: 3px; letter-spacing: -0.25px; }
@@ -55,15 +56,14 @@ h2 { font-size: 18px; margin-top: 3px; letter-spacing: -0.25px; }
   display: flex;
   justify-content: center;
   align-items: center;
-  min-height: 360px;
-  aspect-ratio: 4 / 3;
+  width: 100%;
+  min-width: 0;
+  aspect-ratio: 16 / 9;
   position: relative;
 }
 .video-box img {
   width: 100%;
-  height: auto;
   height: 100%;
-  max-height: 58vh;
   object-fit: contain;
   display: block;
 }
@@ -74,6 +74,20 @@ h2 { font-size: 18px; margin-top: 3px; letter-spacing: -0.25px; }
 }
 .placeholder small { display: block; margin-top: 8px; color: #597288; font-size: 12px; }
 
-@media (max-width: 1100px) { .video-box { min-height: 320px; } }
-@media (max-width: 760px) { .video-box { min-height: 220px; } }
+@container (max-width: 300px) {
+  .view-heading { align-items: flex-end; margin-bottom: 7px; }
+  .kicker { display: none; }
+  h2 { margin-top: 0; font-size: 12px; }
+  .live { font-size: 8px; }
+  .live i { width: 5px; height: 5px; margin-right: 3px; }
+  .video-box { border-radius: 6px; }
+  .placeholder { padding: 6px; font-size: 9px; }
+  .placeholder small { display: none; }
+}
+
+@container (max-width: 190px) {
+  h2 { font-size: 10px; }
+  .live { font-size: 0; }
+  .live i { margin-right: 0; }
+}
 </style>

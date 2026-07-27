@@ -3,7 +3,7 @@
     <div v-if="selfCheckVisible && workspace === 'control'" class="self-check-overlay" role="dialog" aria-modal="true" aria-labelledby="self-check-title">
       <div class="self-check-modal">
         <div class="self-check-heading">
-          <div><p class="eyebrow">SYSTEM DIAGNOSTICS</p><h2 id="self-check-title">启动自检</h2></div>
+          <div><h2 id="self-check-title">启动自检</h2></div>
           <span :class="['self-check-state', selfCheckRunning ? 'checking' : selfCheckPassed ? 'ok' : 'warn']">{{ selfCheckRunning ? "检查中" : selfCheckPassed ? "全部正常" : "需要检查" }}</span>
         </div>
         <div v-if="selfCheckRunning" class="self-check-loading">
@@ -42,7 +42,7 @@
 
       <div class="app-content">
         <header class="header">
-          <div class="page-context"><p class="eyebrow">{{ pageContext.eyebrow }}</p><h1>{{ pageContext.title }}</h1></div>
+          <div class="page-context"><h1>{{ pageContext.title }}</h1></div>
           <StatusBar v-if="workspace === 'control'" :connected="connected" :running="running" :metrics="metrics" />
         </header>
 
@@ -67,8 +67,8 @@
       </section>
 
       <section class="visuals" aria-label="机器人可视化">
-        <section class="panel view" aria-label="摄像头 1 画面"><MuJoCoView :frame="cameraViewsSwapped ? camera2Frame : cameraFrame" :fallback-src="cameraViewsSwapped ? '/video/camera2' : '/video/camera'" kicker="实时画面" title="摄像头 1" placeholder="等待摄像头 1 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera2 : activeCameras.camera}`" liveText="LIVE" waitText="READY" /></section>
-        <section class="panel view" aria-label="摄像头 2 画面"><MuJoCoView :frame="cameraViewsSwapped ? cameraFrame : camera2Frame" :fallback-src="cameraViewsSwapped ? '/video/camera' : '/video/camera2'" kicker="实时画面" title="摄像头 2" placeholder="等待摄像头 2 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera : activeCameras.camera2}`" liveText="LIVE" waitText="READY" /></section>
+        <section class="panel view" aria-label="摄像头 1 画面"><MuJoCoView :frame="cameraViewsSwapped ? camera2Frame : cameraFrame" :fallback-src="cameraViewsSwapped ? '/video/camera2' : '/video/camera'" kicker="实时画面" title="摄像头 1" placeholder="等待摄像头 1 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera2 : activeCameras.camera}`" liveText="实时" waitText="等待" /></section>
+        <section class="panel view" aria-label="摄像头 2 画面"><MuJoCoView :frame="cameraViewsSwapped ? cameraFrame : camera2Frame" :fallback-src="cameraViewsSwapped ? '/video/camera' : '/video/camera2'" kicker="实时画面" title="摄像头 2" placeholder="等待摄像头 2 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera : activeCameras.camera2}`" liveText="实时" waitText="等待" /></section>
         <section class="console" aria-label="运行控制台"><LogPanel :logs="logs" /></section>
       </section>
 
@@ -123,9 +123,9 @@ type Workspace = "control" | "datasets" | "training";
 const initialWorkspace: Workspace = location.hash === "#datasets" ? "datasets" : location.hash === "#training" ? "training" : "control";
 const workspace = ref<Workspace>(initialWorkspace);
 const pageContext = computed(() => ({
-  control: { eyebrow: "TELEOPERATION", title: "遥操作控制台" },
-  datasets: { eyebrow: "DATA OPERATIONS", title: "数据管理平台" },
-  training: { eyebrow: "MODEL TRAINING", title: "训练管理平台" },
+  control: { title: "遥操作控制台" },
+  datasets: { title: "数据管理平台" },
+  training: { title: "训练管理平台" },
 })[workspace.value]);
 
 const ports = ref<string[]>([]);
@@ -433,35 +433,47 @@ body {
 .ctrl { grid-area: control; }
 .ctrl, .joints { align-self: start; }
 .view { width: 100%; min-width: 0; }
-.visuals { grid-area: visuals; display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-self: start; min-width: 0; }
+.visuals { grid-area: visuals; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-self: start; min-width: 0; }
 .visuals .console { grid-column: 1 / -1; }
 .right-rail { grid-area: rail; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
-@media (max-width: 1500px) {
-  .main { grid-template-columns: minmax(285px, 340px) minmax(430px, 1fr); grid-template-areas: "control visuals" "rail rail"; }
+@media (max-width: 1600px) {
+  .main { grid-template-columns: minmax(260px, 310px) minmax(0, 1fr); grid-template-areas: "control visuals" "rail rail"; }
   .right-rail { display: grid; grid-template-columns: 1fr 1fr; }
-  .visuals { grid-template-columns: 1fr; }
 }
-@media (max-width: 900px) {
-  .main { grid-template-columns: 1fr; grid-template-areas: "control" "visuals" "rail"; }
-  .right-rail { display: flex; }
-}
-@media (max-width: 760px) {
-  .app-layout { grid-template-columns: 124px minmax(0, 1fr); }
-  .workspace-sidebar { padding: 16px 8px; }
-  .workspace-tabs button { padding: 8px 7px; }
-  .header, .main { padding-left: 12px; padding-right: 12px; }
-  .main { padding-top: 16px; }
-  .header { align-items: flex-start; gap: 10px; flex-wrap: wrap; }
-}
-@media (max-width: 560px) {
-  .app-layout { grid-template-columns: 58px minmax(0, 1fr); }
-  .workspace-sidebar { padding: 12px 6px; }
+@media (max-width: 1100px) {
+  .app-layout { grid-template-columns: 68px minmax(0, 1fr); }
+  .workspace-sidebar { padding: 14px 7px; }
   .nav-label, .nav-text { display: none; }
   .workspace-tabs button { justify-content: center; padding: 8px 4px; }
   .nav-icon { width: auto; font-size: 18px; }
+  .header { padding-inline: 18px; }
+  .main {
+    grid-template-columns: minmax(260px, .8fr) minmax(300px, 1.2fr);
+    grid-template-areas: "visuals visuals" "control rail";
+    padding: 18px;
+  }
+  .right-rail { display: flex; }
+}
+@media (max-width: 760px) {
+  .app-layout { display: block; }
+  .workspace-sidebar { position: sticky; z-index: 20; top: 0; width: 100%; height: auto; padding: 6px 10px; border-right: 0; border-bottom: 1px solid rgba(160, 190, 220, .13); }
+  .workspace-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+  .workspace-tabs button { min-height: 36px; gap: 6px; }
+  .nav-text { display: inline; }
+  .nav-icon { font-size: 15px; }
+  .header, .main { padding-left: 12px; padding-right: 12px; }
+  .main { grid-template-columns: 1fr; grid-template-areas: "visuals" "control" "rail"; padding-top: 12px; }
+  .header { align-items: flex-start; gap: 10px; flex-wrap: wrap; }
+}
+@media (max-width: 560px) {
+  .workspace-sidebar { padding: 5px 7px; }
+  .workspace-tabs button { min-height: 34px; padding: 6px 3px; font-size: 9px; }
+  .nav-icon { font-size: 13px; }
   .header { padding: 10px; }
   .header .page-context { width: 100%; }
   .main { padding: 10px; gap: 10px; }
   .panel { padding: 12px; }
+  .visuals { gap: 8px; }
+  .visuals .view { padding: 8px; }
 }
 </style>
