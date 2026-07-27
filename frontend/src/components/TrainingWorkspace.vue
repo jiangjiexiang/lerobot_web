@@ -2,7 +2,7 @@
   <main class="training-workspace">
     <header class="training-head">
       <div><p class="eyebrow">MODEL TRAINING</p><h2>训练管理</h2></div>
-      <div class="head-actions"><div class="workspace-tabs" role="tablist"><button :class="{ active: workspaceMode === 'training' }" @click="workspaceMode = 'training'">训练实验</button><button :class="{ active: workspaceMode === 'evaluation' }" @click="workspaceMode = 'evaluation'">模型评估</button></div><button class="refresh" title="刷新主机与任务状态" :disabled="loading" @click="refreshAll">↻</button></div>
+      <div class="head-actions"><div class="workspace-tabs" role="tablist"><button :class="{ active: workspaceMode === 'training' }" @click="workspaceMode = 'training'">训练实验</button><button :class="{ active: workspaceMode === 'evaluation' }" @click="workspaceMode = 'evaluation'">模型评估</button><button :class="{ active: workspaceMode === 'deployment' }" @click="workspaceMode = 'deployment'">模型部署</button></div><button class="refresh" title="刷新主机与任务状态" :disabled="loading" @click="refreshAll">↻</button></div>
     </header>
 
     <div v-if="error" class="training-error">{{ error }}<button @click="error = null">×</button></div>
@@ -114,12 +114,14 @@
         <div v-else class="empty">选择一个任务查看配置和日志</div>
       </section>
     </div>
-    <EvaluationWorkspace v-else @error="error = $event" />
+    <EvaluationWorkspace v-else-if="workspaceMode === 'evaluation'" @error="error = $event" />
+    <DeploymentWorkspace v-else @error="error = $event" />
   </main>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import DeploymentWorkspace from "./DeploymentWorkspace.vue";
 import EvaluationWorkspace from "./EvaluationWorkspace.vue";
 
 interface DatasetSummary { name: string; reviews: { approved: number } }
@@ -146,7 +148,7 @@ const loading = ref(false);
 const creating = ref(false);
 const error = ref<string | null>(null);
 const metricMode = ref<"loss" | "gradNorm">("loss");
-const workspaceMode = ref<"training" | "evaluation">("training");
+const workspaceMode = ref<"training" | "evaluation" | "deployment">("training");
 const showArchived = ref(false);
 const checking = ref(false);
 const preflight = ref<Preflight | null>(null);

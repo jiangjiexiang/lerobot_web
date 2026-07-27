@@ -364,6 +364,48 @@ interface RegisteredModel {
   updatedAt: string;
 }
 
+interface DeploymentRevision {
+  id: string;
+  targetId: string;
+  modelId: string;
+  modelName: string;
+  modelVersion: number;
+  artifactPath: string;
+  sha256: string;
+  action: "deploy" | "rollback";
+  rollbackOf: string | null;
+  status: "active" | "superseded";
+  deployedAt: string;
+  deployedBy: string;
+  notes: string;
+}
+interface DeploymentTarget {
+  id: string;
+  name: string;
+  currentRevisionId: string | null;
+  updatedAt: string | null;
+  revisions: DeploymentRevision[];
+}
+interface InferenceIncident {
+  id: string;
+  targetId: string;
+  revisionId: string | null;
+  modelId: string | null;
+  severity: "warning" | "error" | "critical";
+  category: string;
+  description: string;
+  status: "open" | "resolved";
+  reportedAt: string;
+  reportedBy: string;
+  resolvedAt: string | null;
+  resolution: string;
+}
+interface DeploymentStore {
+  schemaVersion: 1;
+  targets: DeploymentTarget[];
+  incidents: InferenceIncident[];
+}
+
 type EvaluationState = "draft" | "running" | "stopping" | "completed" | "failed" | "cancelled";
 interface EvaluationJob {
   id: string;
@@ -430,6 +472,28 @@ function modelRegistryFile(): string {
 
 function evaluationJobsFile(): string {
   return path.join(TRAINING_ROOT, "evaluations.json");
+}
+
+function deploymentsFile(): string {
+  return path.join(TRAINING_ROOT, "deployments.json");
+}
+
+function readDeploymentStore(): DeploymentStore {
+  try {
+    const value = JSON.parse(fs.readFileSync(deploymentsFile(), "utf-8"));
+    if (Array.isArray(value.targets) && Array.isArray(value.incidents)) return value;
+  } catch { /* initialize below */ }
+  return { schemaVersion: 1, targets: [{ id: "local-robot", name: "本机机器人", currentRevisionId: null, updatedAt: null, revisions: [] }], incidents: [] };
+}
+
+function writeDeploymentStore(store: DeploymentStore): void {
+  fs.mkdirSync(TRAINING_ROOT, { recursive: true });
+  const target = deploymentsFile(); const temporary = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(store, null, 2) + "\n", "utf-8"); fs.renameSync(temporary, target);
+}
+
+function deploymentDirectory(targetId: string): string {
+  return path.join(TRAINING_ROOT, "deployments", targetId);
 }
 
 function readEvaluationJobs(): EvaluationJob[] {
@@ -681,6 +745,55 @@ function fileSha256(file: string): Promise<string> {
     stream.on("error", reject);
     stream.on("end", () => resolve(hash.digest("hex")));
   });
+}
+
+async function verifyDeploymentArtifact(model: RegisteredModel): Promise<{ modelFile: string; artifactPath: string }> {
+  const outputsRoot = path.resolve(TRAINING_ROOT, "outputs");
+  const modelFile = fs.realpathSync(model.modelPath);
+  if (!modelFile.startsWith(outputsRoot + path.sep) || path.basename(modelFile) !== "model.safetensors") throw new Error("模型产物不在受管理的训练输出目录中");
+  const artifactPath = path.dirname(modelFile);
+  if (!fs.existsSync(path.join(artifactPath, "config.json"))) throw new Error("模型目录缺少 config.json");
+  const hash = await fileSha256(modelFile);
+  if (hash !== model.sha256) throw new Error("模型 SHA-256 与登记记录不一致，已阻止部署");
+  return { modelFile, artifactPath };
+}
+
+function switchDeploymentLink(targetId: string, artifactPath: string): string {
+  const directory = deploymentDirectory(targetId); fs.mkdirSync(directory, { recursive: true });
+  const current = path.join(directory, "current"); const temporary = path.join(directory, `.current.${process.pid}.${Date.now()}`);
+  fs.symlinkSync(artifactPath, temporary, "dir");
+  try { fs.renameSync(temporary, current); }
+  catch (error) { try { fs.unlinkSync(temporary); } catch { /* already renamed */ } throw error; }
+  return current;
+}
+
+async function activateDeployment(targetId: string, model: RegisteredModel, input: { actor: string; notes: string; action: "deploy" | "rollback"; rollbackOf?: string | null }): Promise<DeploymentRevision> {
+  if (targetId !== "local-robot") throw new Error("未知部署目标");
+  const { artifactPath } = await verifyDeploymentArtifact(model);
+  const store = readDeploymentStore(); const target = store.targets.find((item) => item.id === targetId);
+  if (!target) throw new Error("找不到部署目标");
+  const now = new Date().toISOString();
+  for (const revision of target.revisions) if (revision.status === "active") revision.status = "superseded";
+  const revision: DeploymentRevision = {
+    id: `deploy-${Date.now().toString(36)}`, targetId, modelId: model.id, modelName: model.name, modelVersion: model.version,
+    artifactPath, sha256: model.sha256, action: input.action, rollbackOf: input.rollbackOf || null, status: "active",
+    deployedAt: now, deployedBy: input.actor || "本地用户", notes: input.notes,
+  };
+  switchDeploymentLink(targetId, artifactPath);
+  target.revisions.unshift(revision); target.currentRevisionId = revision.id; target.updatedAt = now; writeDeploymentStore(store);
+
+  const models = readRegisteredModels();
+  for (const item of models) if (item.name === model.name && item.stage === "production") { item.stage = "candidate"; item.updatedAt = now; }
+  const deployed = models.find((item) => item.id === model.id); if (deployed) { deployed.stage = "production"; deployed.updatedAt = now; }
+  writeRegisteredModels(models);
+  return revision;
+}
+
+function enrichDeploymentTarget(target: DeploymentTarget, incidents: InferenceIncident[]): DeploymentTarget & { current: DeploymentRevision | null; linkPath: string; healthy: boolean; openIncidents: number } {
+  const current = target.revisions.find((item) => item.id === target.currentRevisionId) || null; const linkPath = path.join(deploymentDirectory(target.id), "current");
+  let healthy = false;
+  if (current) { try { healthy = fs.realpathSync(linkPath) === fs.realpathSync(current.artifactPath); } catch { healthy = false; } }
+  return { ...target, current, linkPath, healthy, openIncidents: incidents.filter((item) => item.targetId === target.id && item.status === "open").length };
 }
 
 function enrichTrainingJob(job: TrainingJob): TrainingJob & { metrics: TrainingMetric[]; progress: number; checkpoints: ReturnType<typeof trainingCheckpoints> } {
@@ -1177,6 +1290,64 @@ app.get("/api/training/models", (req, res) => {
     return { ...model, evaluation: { jobs: summaries.length, episodes: summaries.reduce((sum, item) => sum + Number(item.total || 0), 0), success, failure, successRate: evaluated ? success / evaluated : null, ...wilsonInterval(success, failure) } };
   });
   res.json({ ok: true, models });
+});
+
+app.get("/api/training/deployments", (req, res) => {
+  const store = readDeploymentStore();
+  res.json({ ok: true, targets: store.targets.map((target) => enrichDeploymentTarget(target, store.incidents)), incidents: store.incidents });
+});
+
+app.post("/api/training/deployments/:target/deploy", async (req, res) => {
+  const model = readRegisteredModels().find((item) => item.id === req.body?.modelId);
+  if (!model) { res.status(404).json({ ok: false, error: "找不到已登记模型" }); return; }
+  if (model.stage !== "production") { res.status(409).json({ ok: false, error: "只有 production 模型可以部署" }); return; }
+  const store = readDeploymentStore(); const target = store.targets.find((item) => item.id === req.params.target);
+  if (!target) { res.status(404).json({ ok: false, error: "找不到部署目标" }); return; }
+  const current = target.revisions.find((item) => item.id === target.currentRevisionId);
+  if (current?.modelId === model.id) { res.status(409).json({ ok: false, error: "该模型已经是当前部署版本" }); return; }
+  try {
+    const revision = await activateDeployment(target.id, model, { actor: cleanShortText(req.body?.actor, 80), notes: cleanShortText(req.body?.notes, 500), action: "deploy" });
+    res.status(201).json({ ok: true, revision });
+  } catch (error) { res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/training/deployments/:target/rollback", async (req, res) => {
+  const store = readDeploymentStore(); const target = store.targets.find((item) => item.id === req.params.target);
+  const source = target?.revisions.find((item) => item.id === req.body?.revisionId);
+  if (!target || !source) { res.status(404).json({ ok: false, error: "找不到部署目标或历史修订" }); return; }
+  if (source.id === target.currentRevisionId) { res.status(409).json({ ok: false, error: "所选修订已经是当前版本" }); return; }
+  const model = readRegisteredModels().find((item) => item.id === source.modelId);
+  if (!model) { res.status(409).json({ ok: false, error: "历史修订关联的模型已不存在" }); return; }
+  try {
+    const revision = await activateDeployment(target.id, model, { actor: cleanShortText(req.body?.actor, 80), notes: cleanShortText(req.body?.notes, 500), action: "rollback", rollbackOf: target.currentRevisionId });
+    res.status(201).json({ ok: true, revision });
+  } catch (error) { res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/training/deployments/:target/incidents", (req, res) => {
+  const store = readDeploymentStore(); const target = store.targets.find((item) => item.id === req.params.target);
+  const severities: InferenceIncident["severity"][] = ["warning", "error", "critical"];
+  const categories = ["jitter", "action_offset", "collision", "camera", "latency", "hardware", "other"];
+  const severity = typeof req.body?.severity === "string" && severities.includes(req.body.severity) ? req.body.severity as InferenceIncident["severity"] : null;
+  const category = typeof req.body?.category === "string" && categories.includes(req.body.category) ? req.body.category : null;
+  const description = cleanShortText(req.body?.description, 1000);
+  const current = target?.revisions.find((item) => item.id === target.currentRevisionId) || null;
+  if (!target || !current || !severity || !category || !description) { res.status(400).json({ ok: false, error: "部署目标、严重程度、异常类型或描述无效" }); return; }
+  const incident: InferenceIncident = {
+    id: `incident-${Date.now().toString(36)}`, targetId: target.id, revisionId: current.id, modelId: current.modelId,
+    severity, category, description, status: "open", reportedAt: new Date().toISOString(), reportedBy: cleanShortText(req.body?.actor, 80) || "本地用户", resolvedAt: null, resolution: "",
+  };
+  store.incidents.unshift(incident); writeDeploymentStore(store); res.status(201).json({ ok: true, incident });
+});
+
+app.patch("/api/training/incidents/:incident/resolve", (req, res) => {
+  const store = readDeploymentStore(); const incident = store.incidents.find((item) => item.id === req.params.incident);
+  const resolution = cleanShortText(req.body?.resolution, 1000);
+  if (!incident) { res.status(404).json({ ok: false, error: "找不到推理异常" }); return; }
+  if (incident.status === "resolved") { res.status(409).json({ ok: false, error: "异常已经关闭" }); return; }
+  if (!resolution) { res.status(400).json({ ok: false, error: "关闭异常时必须填写处理结论" }); return; }
+  incident.status = "resolved"; incident.resolvedAt = new Date().toISOString(); incident.resolution = resolution; writeDeploymentStore(store);
+  res.json({ ok: true, incident });
 });
 
 app.get("/api/training/evaluations", (req, res) => {
