@@ -1,6 +1,6 @@
-# LeRobot Web · SO-101 遥操作控制台
+# LeRobot Web · SO-101 数据与训练平台
 
-用于 SO-101 Leader / Follower 机械臂的网页遥操作。当前稳定使用方式是 **两只机械臂连接同一台机器人电脑**；浏览器通过网页控制台启动、停止和观察遥操作。MuJoCo 功能已关闭，控制链路不再初始化仿真或生成仿真帧。
+面向 SO-101 Leader / Follower 机械臂的本地网页平台，覆盖双摄像头遥操作、LeRobot 数据录制与审核、训练任务、模型评估和受控部署。当前稳定使用方式是 **两只机械臂连接同一台机器人电脑**；MuJoCo 功能已关闭，控制链路不再初始化仿真或生成仿真帧。
 
 > 要把 Leader 放到另一台 Wi‑Fi 电脑，请先阅读 [双电脑 Wi‑Fi 遥操作设计](docs/WIFI_TWO_COMPUTER_TELEOP.md)。项目中已有 `operator-server` 原型，但它与当前一体化桥接脚本的消息协议尚未完成对接，不能直接用于生产遥操作。
 
@@ -29,7 +29,7 @@ cd ~/lerobot_web
 ./start_robot.sh
 ```
 
-打开 `http://localhost:5173`。页面中确认串口和 ID 后启动遥操作；建议先选择“仅网页画面”。Vite 会把控制 API、WebSocket 和视频流代理到 Robot Server。
+打开终端打印的网页地址，默认是 `http://localhost:5173`；配置证书时使用 `https://localhost:5173`。页面中确认串口和 ID 后启动遥操作；建议先选择“仅网页画面”。Vite 会把控制 API、WebSocket 和视频流代理到 Robot Server。
 
 默认启动为轻量模式：控制频率为 60 FPS，并开启机器人摄像头（15 FPS）。网页会枚举 `/dev/video*` 并允许选择摄像头。如需关闭摄像头，可使用 `ENABLE_CAMERA=0 ./start_robot.sh`。MuJoCo 已关闭，`STREAM_FPS` 不再启用仿真推流。
 
@@ -73,6 +73,18 @@ HTTPS_KEY="$PWD/.certs/lerobot-lan.key" \
 | 推流 WebSocket | `ws://localhost:43127/ws/stream` |
 | 健康检查 | `http://localhost:43127/health` |
 
+## 工作区
+
+| 工作区 | 地址 | 主要能力 |
+| --- | --- | --- |
+| 遥操作 | `/#` | 双机械臂控制、双路 16:9 摄像头、实时状态、数据录制 |
+| 数据管理 | `/#datasets` | Dataset/Episode 浏览、同步回放、审核标签、质量扫描、训练选集发布 |
+| 训练管理 | `/#training` | 主机检测、资源估算、任务队列、指标、Checkpoint、模型评估与部署 |
+
+训练工作台使用“任务队列 + 详情面板”布局。新建配置按需展开；队列支持搜索、状态筛选和最多四个 Run 对比；详情分为概览、指标、产物与日志。页面会检测 CPU、内存、磁盘、CUDA/GPU、显存、利用率和温度，并在任务启动前检查数据质量、依赖、资源容量和设备占用。
+
+训练任务只读取已发布的训练选集，默认关闭 Hugging Face 上传和 W&B，输出写入 `~/lerobot_datasets/.lerobot-web/training/outputs/<job-id>`。Checkpoint 可续训并登记为版本化模型；模型可通过独立 Dataset 评估，满足发布门禁后再部署到本机目标。Generic SSH 云端方案只导出可审计命令和数据同步说明，不会自动连接或上传。
+
 ## 常用操作
 
 ### 关闭卡住的遥操作进程
@@ -106,7 +118,7 @@ ls /dev/ttyACM* /dev/ttyUSB*
 
 页面顶部切换到“数据管理”（也可直接打开 `http://localhost:5173/#datasets`）后，可以浏览本地数据集和 episode、同步回放两路摄像头视频，并编辑审核状态、标签和备注。审核内容保存在数据集内的 `.lerobot-web/reviews.json`，不会改写原始 Parquet 或视频文件。
 
-通过审核的数据仍保留在原 Dataset。点击“发布已通过数据”会生成不可变训练选集，例如 `~/lerobot_datasets/<数据集>/.lerobot-web/collections/v001.json`。左侧“训练管理”（`http://localhost:5173/#training`）可检测 CPU、内存、磁盘和 CUDA/GPU，并基于该选集创建 ACT、Diffusion、SmolVLA 等训练任务。训练输出默认位于 `~/lerobot_datasets/.lerobot-web/training/outputs/<job-id>`。
+通过审核的数据仍保留在原 Dataset。点击“发布已通过数据”会生成不可变训练选集，例如 `~/lerobot_datasets/<数据集>/.lerobot-web/collections/v001.json`。左侧“训练管理”（`/#training`）可基于该选集创建 ACT、Diffusion、SmolVLA 等训练任务。
 
 ## 项目结构
 
@@ -121,6 +133,7 @@ robot-server/           当前机器人端 API / WebSocket 服务
 operator-server/        双电脑操作端原型（待完成协议对接）
 frontend/               Vue 3 控制台
 docs/                   部署与设计文档
+  TRAINING_WORKSPACE_PLAN.md  训练工作台计划、竞品依据与验收记录
 start_robot.sh          一键启动机器人端与前端
 start_operator.sh       操作端原型启动脚本
 ```
@@ -130,7 +143,8 @@ start_operator.sh       操作端原型启动脚本
 ```bash
 cd frontend && npm run build
 cd ../robot-server && npm run build
-/home/jiang/miniconda3/envs/lerobot/bin/python -m py_compile ../bridge/teleop_mujoco.py
+cd ../operator-server && npm run build
+"${PYTHON_PATH:-python3}" -m py_compile ../bridge/teleop_mujoco.py
 ```
 
 ## 安全提示
