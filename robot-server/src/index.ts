@@ -216,7 +216,7 @@ function datasetPath(name: string): string {
   return path.join(DATASET_ROOT, name);
 }
 
-function runDatasetCatalog(command: "list" | "detail", dataset?: string): Promise<Record<string, unknown>> {
+function runDatasetCatalog(command: "list" | "detail" | "quality", dataset?: string): Promise<Record<string, unknown>> {
   const args = [DATASET_CATALOG_SCRIPT, command, "--root", DATASET_ROOT];
   if (dataset) args.push("--dataset", dataset);
   return new Promise((resolve, reject) => {
@@ -806,6 +806,17 @@ async function trainingPreflight(job: TrainingJob): Promise<{ ready: boolean; ch
   const collectionPath = path.join(collectionsDirectory(datasetRoot), `${job.collection}.json`);
   const datasetReady = fs.existsSync(datasetRoot) && fs.existsSync(collectionPath);
   checks.push({ id: "dataset", label: "训练数据", status: datasetReady ? "pass" : "fail", detail: datasetReady ? `${job.episodes.length} 个已发布 Episode 可用` : "数据集或训练选集已不存在" });
+  if (datasetReady) {
+    try {
+      const quality = await runDatasetCatalog("quality", job.dataset) as { episodes?: Array<{ episode: number; flags?: Array<{ level: string }> }> };
+      const selected = (quality.episodes || []).filter((episode) => job.episodes.includes(episode.episode));
+      const errors = selected.reduce((sum, episode) => sum + (episode.flags || []).filter((flag) => flag.level === "error").length, 0);
+      const warnings = selected.reduce((sum, episode) => sum + (episode.flags || []).filter((flag) => flag.level === "warning").length, 0);
+      checks.push({ id: "dataset_quality", label: "数据质量扫描", status: errors ? "fail" : warnings ? "warning" : "pass", detail: errors ? `${errors} 个错误风险，已阻止训练` : warnings ? `${warnings} 个警告风险，请确认后继续` : "黑屏、冻结、轨迹突变和重复风险均未发现" });
+    } catch (error) {
+      checks.push({ id: "dataset_quality", label: "数据质量扫描", status: "fail", detail: error instanceof Error ? error.message : "质量扫描失败" });
+    }
+  }
 
   const python = await runPythonCheck("import lerobot,torch; print(torch.__version__)");
   checks.push({ id: "runtime", label: "LeRobot 运行环境", status: python.ok ? "pass" : "fail", detail: python.ok ? `PyTorch ${python.output}` : python.output || "无法导入 lerobot/torch" });
@@ -1195,6 +1206,13 @@ app.get("/api/datasets/:dataset", async (req, res) => {
   } catch (error) {
     res.status(404).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
+});
+
+app.get("/api/datasets/:dataset/quality", async (req, res) => {
+  const dataset = cleanDatasetName(req.params.dataset);
+  if (!dataset) { res.status(400).json({ ok: false, error: "无效的数据集名称" }); return; }
+  try { res.json({ ok: true, ...(await runDatasetCatalog("quality", dataset)) }); }
+  catch (error) { res.status(404).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
 });
 
 app.get("/api/datasets/:dataset/video", (req, res) => {
