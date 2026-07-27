@@ -295,6 +295,14 @@ function readCollections(root: string): TrainingCollection[] {
   }
 }
 
+function listDatasetFiles(root: string, directory = root): string[] {
+  return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    if (entry.name === ".lerobot-web") return [];
+    const absolute = path.join(directory, entry.name);
+    return entry.isDirectory() ? listDatasetFiles(root, absolute) : entry.isFile() ? [path.relative(root, absolute)] : [];
+  });
+}
+
 function readAudit(root: string): Record<string, unknown>[] {
   try {
     return fs.readFileSync(path.join(root, ".lerobot-web", "audit.jsonl"), "utf-8")
@@ -1334,6 +1342,26 @@ app.get("/api/datasets/:dataset/collections/:collection/manifest", (req, res) =>
     res.sendFile(file, { dotfiles: "allow" });
   } catch {
     res.status(404).json({ ok: false, error: "找不到训练选集" });
+  }
+});
+
+app.get("/api/datasets/:dataset/collections/:collection/snapshot", async (req, res) => {
+  const dataset = cleanDatasetName(req.params.dataset);
+  const collectionId = /^v\d{3}$/.test(req.params.collection) ? req.params.collection : null;
+  if (!dataset || !collectionId) { res.status(400).json({ ok: false, error: "训练快照参数无效" }); return; }
+  try {
+    const root = fs.realpathSync(datasetPath(dataset));
+    const collection = readCollections(root).find((item) => item.id === collectionId);
+    if (!collection) { res.status(404).json({ ok: false, error: "找不到训练选集" }); return; }
+    const sourceFiles = await Promise.all(listDatasetFiles(root).sort().map(async (relativePath) => {
+      const absolute = path.join(root, relativePath); const stat = fs.statSync(absolute);
+      return { relativePath, sizeBytes: stat.size, modifiedAt: stat.mtime.toISOString(), sha256: await fileSha256(absolute) };
+    }));
+    const fingerprint = crypto.createHash("sha256").update(JSON.stringify({ dataset, collection, sourceFiles })).digest("hex");
+    const snapshot = { schemaVersion: 1, generatedAt: new Date().toISOString(), dataset, collection, sourceFiles, fingerprint };
+    res.json({ ok: true, snapshot });
+  } catch (error) {
+    res.status(404).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 });
 
