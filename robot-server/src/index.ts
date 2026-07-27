@@ -341,6 +341,27 @@ interface TrainingJob {
   error: string | null;
   logs: string[];
   archivedAt?: string | null;
+  bestAt?: string | null;
+}
+
+type ModelStage = "candidate" | "production" | "archived";
+interface RegisteredModel {
+  id: string;
+  name: string;
+  version: number;
+  jobId: string;
+  checkpoint: string;
+  step: number;
+  policy: string;
+  dataset: string;
+  collection: string;
+  modelPath: string;
+  sizeBytes: number;
+  sha256: string;
+  stage: ModelStage;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 interface PreflightCheck {
@@ -354,6 +375,27 @@ const trainingProcesses = new Map<string, ChildProcess>();
 
 function trainingJobsFile(): string {
   return path.join(TRAINING_ROOT, "jobs.json");
+}
+
+function modelRegistryFile(): string {
+  return path.join(TRAINING_ROOT, "models.json");
+}
+
+function readRegisteredModels(): RegisteredModel[] {
+  try {
+    const value = JSON.parse(fs.readFileSync(modelRegistryFile(), "utf-8"));
+    return Array.isArray(value.models) ? value.models : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeRegisteredModels(models: RegisteredModel[]): void {
+  fs.mkdirSync(TRAINING_ROOT, { recursive: true });
+  const target = modelRegistryFile();
+  const temporary = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify({ models }, null, 2) + "\n", "utf-8");
+  fs.renameSync(temporary, target);
 }
 
 function readTrainingJobs(): TrainingJob[] {
@@ -878,6 +920,10 @@ app.get("/api/training/jobs", (req, res) => {
   res.json({ ok: true, jobs: jobs.filter((job) => includeArchived || !job.archivedAt).map(enrichTrainingJob) });
 });
 
+app.get("/api/training/models", (req, res) => {
+  res.json({ ok: true, models: readRegisteredModels() });
+});
+
 app.post("/api/training/jobs", (req, res) => {
   const dataset = cleanDatasetName(req.body.dataset);
   const collectionId = typeof req.body.collection === "string" && /^v\d{3}$/.test(req.body.collection) ? req.body.collection : null;
@@ -970,7 +1016,7 @@ app.post("/api/training/jobs/:job/clone", (req, res) => {
     `--log_freq=${source.logFreq ?? 200}`, `--save_freq=${source.saveFreq ?? Math.min(20000, source.steps)}`,
     `--num_workers=${source.numWorkers ?? 4}`, `--seed=${source.seed ?? 1000}`,
   ];
-  const cloned: TrainingJob = { ...source, id, name: `${source.name} copy`, state: "draft", createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, outputDir, command, exitCode: null, error: null, logs: [], attempts: 0, archivedAt: null };
+  const cloned: TrainingJob = { ...source, id, name: `${source.name} copy`, state: "draft", createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, outputDir, command, exitCode: null, error: null, logs: [], attempts: 0, archivedAt: null, bestAt: null };
   const jobs = readTrainingJobs(); jobs.unshift(cloned); writeTrainingJobs(jobs);
   res.status(201).json({ ok: true, job: enrichTrainingJob(cloned) });
 });
@@ -984,6 +1030,21 @@ app.post("/api/training/jobs/:job/archive", (req, res) => {
   res.json({ ok: true, job: updated ? enrichTrainingJob(updated) : null });
 });
 
+app.post("/api/training/jobs/:job/best", (req, res) => {
+  const jobs = readTrainingJobs();
+  const job = jobs.find((item) => item.id === req.params.job);
+  if (!job) { res.status(404).json({ ok: false, error: "找不到训练任务" }); return; }
+  if (job.state !== "completed") { res.status(409).json({ ok: false, error: "只有已完成任务可以标记为最佳 Run" }); return; }
+  const best = req.body?.best !== false;
+  const now = new Date().toISOString();
+  for (const item of jobs) {
+    if (best && item.dataset === job.dataset && item.collection === job.collection && item.policy === job.policy) item.bestAt = null;
+  }
+  job.bestAt = best ? now : null;
+  writeTrainingJobs(jobs);
+  res.json({ ok: true, job: enrichTrainingJob(job) });
+});
+
 app.get("/api/training/jobs/:job/checkpoints/:checkpoint/integrity", async (req, res) => {
   const job = readTrainingJobs().find((item) => item.id === req.params.job);
   const checkpoint = job && trainingCheckpoints(job).find((item) => item.name === req.params.checkpoint);
@@ -991,6 +1052,47 @@ app.get("/api/training/jobs/:job/checkpoints/:checkpoint/integrity", async (req,
   if (!checkpoint.modelPath) { res.status(404).json({ ok: false, error: "Checkpoint 中没有 model.safetensors" }); return; }
   try { res.json({ ok: true, algorithm: "sha256", hash: await fileSha256(checkpoint.modelPath), file: path.basename(checkpoint.modelPath), sizeBytes: fs.statSync(checkpoint.modelPath).size }); }
   catch (error) { res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/training/jobs/:job/checkpoints/:checkpoint/register", async (req, res) => {
+  const job = readTrainingJobs().find((item) => item.id === req.params.job);
+  const checkpoint = job && trainingCheckpoints(job).find((item) => item.name === req.params.checkpoint);
+  if (!job || !checkpoint) { res.status(404).json({ ok: false, error: "找不到 Checkpoint" }); return; }
+  if (!checkpoint.modelPath) { res.status(409).json({ ok: false, error: "Checkpoint 中没有可登记的 model.safetensors" }); return; }
+  const models = readRegisteredModels();
+  const existing = models.find((model) => model.jobId === job.id && model.checkpoint === checkpoint.name);
+  if (existing) { res.status(409).json({ ok: false, error: `该 Checkpoint 已登记为 ${existing.name} v${existing.version}` }); return; }
+  const name = cleanShortText(req.body?.name, 80) || job.name;
+  const notes = cleanShortText(req.body?.notes, 500);
+  const version = Math.max(0, ...models.filter((model) => model.name === name).map((model) => model.version)) + 1;
+  try {
+    const now = new Date().toISOString();
+    const model: RegisteredModel = {
+      id: `model-${Date.now().toString(36)}`, name, version, jobId: job.id, checkpoint: checkpoint.name,
+      step: checkpoint.step, policy: job.policy, dataset: job.dataset, collection: job.collection,
+      modelPath: checkpoint.modelPath, sizeBytes: fs.statSync(checkpoint.modelPath).size,
+      sha256: await fileSha256(checkpoint.modelPath), stage: "candidate", notes, createdAt: now, updatedAt: now,
+    };
+    models.unshift(model); writeRegisteredModels(models);
+    res.status(201).json({ ok: true, model });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.patch("/api/training/models/:model", (req, res) => {
+  const models = readRegisteredModels();
+  const model = models.find((item) => item.id === req.params.model);
+  if (!model) { res.status(404).json({ ok: false, error: "找不到已登记模型" }); return; }
+  const stages: ModelStage[] = ["candidate", "production", "archived"];
+  const stage = typeof req.body?.stage === "string" && stages.includes(req.body.stage) ? req.body.stage as ModelStage : null;
+  if (!stage) { res.status(400).json({ ok: false, error: "模型阶段无效" }); return; }
+  if (stage === "production") {
+    for (const item of models) if (item.name === model.name && item.stage === "production") { item.stage = "candidate"; item.updatedAt = new Date().toISOString(); }
+  }
+  model.stage = stage; model.updatedAt = new Date().toISOString();
+  writeRegisteredModels(models);
+  res.json({ ok: true, model });
 });
 
 app.post("/api/training/jobs/:job/stop", (req, res) => {

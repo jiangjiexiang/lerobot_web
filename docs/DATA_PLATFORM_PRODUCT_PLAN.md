@@ -34,9 +34,9 @@
 | 参数记录 | Config | Parameters | Configuration | Runtime spec | Dataset、选集、策略与超参数 |
 | 指标曲线 | Metrics / Panels | Metrics | Scalars / Plots | 依赖观测系统 | Step、Loss、Grad norm、LR |
 | 系统资源 | System metrics | 可接监控 | Resource monitoring | CPU/GPU resources | CPU、内存、GPU、温度、磁盘 |
-| 模型产物 | Artifacts | Artifacts / Models | Models / Artifacts | Volume / Registry 对接 | Checkpoint 与输出目录 |
+| 模型产物 | Artifacts | Artifacts / Models | Models / Artifacts | Volume / Registry 对接 | Checkpoint、哈希校验与模型登记 |
 | 任务调度 | Launch / Sweeps | Projects 扩展 | Queue / Agent | 分布式 Runtime | 单机串行队列，后续加 Agent |
-| 恢复与比较 | Resume / Compare | Run compare | Clone / Continue | Job restart | Checkpoint 续训，待加跨任务比较 |
+| 恢复与比较 | Resume / Compare | Run compare | Clone / Continue | Job restart | Checkpoint 续训、Run 对比、最佳标记 |
 
 参考资料：
 
@@ -122,10 +122,11 @@
 - SmolVLA 在 8GB 显存设备上建议 batch size 不超过 28；Pi0 提示额外安装 `lerobot[pi]`。
 - 任务状态包括待启动、训练中、停止中、已完成和失败；保存命令、日志、退出码、输出目录和 Checkpoint。
 - 中断续训使用 `checkpoints/last/pretrained_model/train_config.json` 与 `--resume=true`。
+- 支持最多 4 个 Run 的参数、Loss、耗时和产物对比；最佳 Run 在同一 Dataset、训练选集和策略内唯一。
+- Checkpoint 可登记为版本化模型，记录来源 Run、Step、文件大小和 SHA-256，并支持 candidate、production、archived 生命周期。
 
 ## 后续训练闭环
 
-- 跨任务指标对比、最佳 Run 标记和参数差异视图。
-- Checkpoint 模型版本登记与推理评估关联。
 - 实时推理评估任务与评估 Dataset 隔离，避免覆盖训练数据。
+- 已登记模型与推理评估结果关联，按任务成功率选择生产版本。
 - 模型部署、回滚和推理异常记录。
