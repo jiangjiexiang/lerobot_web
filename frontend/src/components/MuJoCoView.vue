@@ -5,18 +5,21 @@
         <p class="kicker">{{ kicker }}</p>
         <h2>{{ title }}</h2>
       </div>
-      <span class="live" :class="{ active: !!frame }"><i></i>{{ frame ? liveText : waitText }}</span>
+      <span class="live" :class="{ active: hasImage }"><i></i>{{ hasImage ? liveText : waitText }}</span>
     </div>
     <div class="video-box">
-      <img v-if="frame" :src="frame" :alt="title" />
+      <img v-if="frame || fallbackSrc" :src="frame || fallbackSrc" :alt="title" @load="fallbackLoaded = true" @error="fallbackLoaded = false" />
       <span v-else class="placeholder">{{ placeholder }}<small>{{ hint }}</small></span>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-withDefaults(defineProps<{
+import { computed, ref } from "vue";
+
+const props = withDefaults(defineProps<{
   frame: string | null;
+  fallbackSrc?: string;
   kicker?: string;
   title?: string;
   placeholder?: string;
@@ -31,6 +34,9 @@ withDefaults(defineProps<{
   liveText: "LIVE",
   waitText: "WAITING",
 });
+
+const fallbackLoaded = ref(false);
+const hasImage = computed(() => Boolean(props.frame) || fallbackLoaded.value);
 </script>
 
 <style scoped>

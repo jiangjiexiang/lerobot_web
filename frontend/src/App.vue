@@ -1,6 +1,6 @@
 <template>
   <div class="app-shell">
-    <div v-if="selfCheckVisible" class="self-check-overlay" role="dialog" aria-modal="true" aria-labelledby="self-check-title">
+    <div v-if="selfCheckVisible && workspace === 'control'" class="self-check-overlay" role="dialog" aria-modal="true" aria-labelledby="self-check-title">
       <div class="self-check-modal">
         <div class="self-check-heading">
           <div><p class="eyebrow">SYSTEM DIAGNOSTICS</p><h2 id="self-check-title">启动自检</h2></div>
@@ -30,18 +30,23 @@
         <div class="fatal-actions"><button class="primary" @click="modalError = null">知道了</button></div>
       </div>
     </div>
-    <header class="header">
-      <div class="brand">
-        <span class="brand-mark">SO</span>
-        <div>
-          <p class="eyebrow">LE ROBOT · TELEOPERATION</p>
-          <h1>SO-101 控制台</h1>
-        </div>
-      </div>
-      <StatusBar :connected="connected" :running="running" :metrics="metrics" />
-    </header>
+    <div class="app-layout">
+      <aside class="workspace-sidebar">
+        <p class="nav-label">工作区</p>
+        <nav class="workspace-tabs" aria-label="工作区">
+          <button :class="{ active: workspace === 'control' }" @click="workspace = 'control'"><span class="nav-icon">⌁</span><span class="nav-text">遥操作</span></button>
+          <button :class="{ active: workspace === 'datasets' }" @click="workspace = 'datasets'"><span class="nav-icon">▤</span><span class="nav-text">数据管理</span></button>
+          <button :class="{ active: workspace === 'training' }" @click="workspace = 'training'"><span class="nav-icon">▷</span><span class="nav-text">训练管理</span></button>
+        </nav>
+      </aside>
 
-    <main class="main">
+      <div class="app-content">
+        <header class="header">
+          <div class="page-context"><p class="eyebrow">{{ pageContext.eyebrow }}</p><h1>{{ pageContext.title }}</h1></div>
+          <StatusBar v-if="workspace === 'control'" :connected="connected" :running="running" :metrics="metrics" />
+        </header>
+
+        <main v-if="workspace === 'control'" class="main">
       <section class="panel ctrl" aria-label="遥操作配置">
         <ControlPanel
           :ports="ports"
@@ -62,15 +67,22 @@
       </section>
 
       <section class="visuals" aria-label="机器人可视化">
-        <section class="panel view" aria-label="摄像头 1 画面"><MuJoCoView :frame="cameraViewsSwapped ? camera2Frame : cameraFrame" kicker="实时画面" title="摄像头 1" placeholder="等待摄像头 1 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera2 : activeCameras.camera}`" liveText="LIVE" waitText="READY" /></section>
-        <section class="panel view" aria-label="摄像头 2 画面"><MuJoCoView :frame="cameraViewsSwapped ? cameraFrame : camera2Frame" kicker="实时画面" title="摄像头 2" placeholder="等待摄像头 2 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera : activeCameras.camera2}`" liveText="LIVE" waitText="READY" /></section>
+        <section class="panel view" aria-label="摄像头 1 画面"><MuJoCoView :frame="cameraViewsSwapped ? camera2Frame : cameraFrame" :fallback-src="cameraViewsSwapped ? '/video/camera2' : '/video/camera'" kicker="实时画面" title="摄像头 1" placeholder="等待摄像头 1 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera2 : activeCameras.camera}`" liveText="LIVE" waitText="READY" /></section>
+        <section class="panel view" aria-label="摄像头 2 画面"><MuJoCoView :frame="cameraViewsSwapped ? cameraFrame : camera2Frame" :fallback-src="cameraViewsSwapped ? '/video/camera' : '/video/camera2'" kicker="实时画面" title="摄像头 2" placeholder="等待摄像头 2 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera : activeCameras.camera2}`" liveText="LIVE" waitText="READY" /></section>
         <section class="console" aria-label="运行控制台"><LogPanel :logs="logs" /></section>
       </section>
 
       <aside class="right-rail" aria-label="实时状态">
+        <section class="panel recorder" aria-label="数据集录制">
+          <RecordingPanel :recording="recording" :running="running" :busy="recordingPending" @start="handleRecordingStart" @stop="handleRecordingStop" @cancel="handleRecordingCancel" />
+        </section>
         <section class="panel joints" aria-label="实时关节数据"><JointPanel :leader="leaderJoints" :follower="followerJoints" /></section>
       </aside>
-    </main>
+        </main>
+        <DatasetWorkspace v-else-if="workspace === 'datasets'" />
+        <TrainingWorkspace v-else />
+      </div>
+    </div>
   </div>
 </template>
 
@@ -82,6 +94,9 @@ import ControlPanel from "./components/ControlPanel.vue";
 import MuJoCoView from "./components/MuJoCoView.vue";
 import JointPanel from "./components/JointPanel.vue";
 import LogPanel from "./components/LogPanel.vue";
+import RecordingPanel from "./components/RecordingPanel.vue";
+import DatasetWorkspace from "./components/DatasetWorkspace.vue";
+import TrainingWorkspace from "./components/TrainingWorkspace.vue";
 import { useLeaderSerial } from "./composables/useLeaderSerial";
 
 const {
@@ -93,6 +108,7 @@ const {
   camera2Frame,
   logs,
   fatalError,
+  recording,
   metrics,
   log,
   send,
@@ -103,12 +119,21 @@ const modalError = computed({
   set: (value) => { fatalError.value = value; frontError.value = value; },
 });
 const frontError = ref<string | null>(null);
+type Workspace = "control" | "datasets" | "training";
+const initialWorkspace: Workspace = location.hash === "#datasets" ? "datasets" : location.hash === "#training" ? "training" : "control";
+const workspace = ref<Workspace>(initialWorkspace);
+const pageContext = computed(() => ({
+  control: { eyebrow: "TELEOPERATION", title: "遥操作控制台" },
+  datasets: { eyebrow: "DATA OPERATIONS", title: "数据管理平台" },
+  training: { eyebrow: "MODEL TRAINING", title: "训练管理平台" },
+})[workspace.value]);
 
 const ports = ref<string[]>([]);
 const cameras = ref<{ index: number; path: string }[]>([]);
 const detectedCameras = ref<number[]>([]);
 const activeCameras = ref<{ camera: number; camera2: number }>({ camera: -1, camera2: -1 });
 const actionPending = ref(false);
+const recordingPending = ref(false);
 const cameraViewsSwapped = ref(false);
 const selfCheckRunning = ref(false);
 const selfCheck = ref<Record<string, any> | null>(null);
@@ -205,6 +230,31 @@ function handleSwapCameraViews() {
   log("已交换左右摄像头画面");
 }
 
+async function recordingRequest(endpoint: "start" | "stop" | "cancel", body?: object) {
+  if (recordingPending.value) return;
+  recordingPending.value = true;
+  try {
+    const res = await fetch(`/api/recording/${endpoint}`, {
+      method: "POST",
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    log(endpoint === "start" ? "数据集录制已启动" : endpoint === "stop" ? "正在编码并保存 episode" : "正在丢弃本次录制");
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    log(`录制操作失败: ${message}`);
+    frontError.value = `录制操作失败: ${message}`;
+  } finally {
+    recordingPending.value = false;
+  }
+}
+
+function handleRecordingStart(config: { dataset: string; task: string; fps: number; plannedEpisodes: number; episodeTime: number; resetTime: number; resume: boolean }) { void recordingRequest("start", config); }
+function handleRecordingStop() { void recordingRequest("stop"); }
+function handleRecordingCancel() { void recordingRequest("cancel"); }
+
 async function handleStart(config: Record<string, unknown>) {
   if (actionPending.value || running.value) return;
   // 前端 camelCase -> 后端 snake_case
@@ -276,6 +326,10 @@ watch(running, async (isRunning, wasRunning) => {
   }
 });
 
+watch(workspace, (value) => {
+  history.replaceState(null, "", value === "control" ? location.pathname + location.search : `#${value}`);
+});
+
 onMounted(async () => {
   await fetchPorts();
   await runSelfCheck();
@@ -339,28 +393,24 @@ body {
 .fatal-actions { display: flex; justify-content: flex-end; margin-top: 20px; }
 .fatal-actions button { padding: 9px 16px; border: 0; border-radius: 8px; cursor: pointer; font-weight: 600; }
 .fatal-actions .primary { color: #06101a; background: #64d6f4; }
+.app-layout { display: grid; grid-template-columns: 184px minmax(0, 1fr); min-height: 100vh; }
+.workspace-sidebar { position: sticky; top: 0; height: 100vh; padding: 20px 12px; border-right: 1px solid rgba(160, 190, 220, .13); background: #081421; }
+.app-content { min-width: 0; }
 .header {
-  max-width: 1560px;
-  margin: 0 auto;
-  padding: 22px 28px;
+  min-height: 72px;
+  padding: 14px 28px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid rgba(160, 190, 220, 0.13);
 }
-.brand { display: flex; align-items: center; gap: 12px; }
-.brand-mark {
-  display: grid;
-  place-items: center;
-  width: 38px;
-  height: 38px;
-  border-radius: 11px;
-  color: #08111e;
-  font-size: 13px;
-  font-weight: 800;
-  background: linear-gradient(135deg, #64dcff, #88a6ff);
-  box-shadow: 0 8px 22px rgba(69, 174, 248, 0.25);
-}
+.page-context h1 { margin-top: 2px; font-size: 17px; }
+.nav-label { margin: 4px 8px 10px; color: #526d82; font-size: 9px; }
+.workspace-tabs { display: flex; flex-direction: column; gap: 3px; }
+.workspace-tabs button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 40px; padding: 8px 10px; border: 0; border-radius: 5px; cursor: pointer; text-align: left; background: transparent; color: #7891a5; font-size: 11px; }
+.workspace-tabs button:hover { background: #102638; color: #b8d0e1; }
+.workspace-tabs button.active { color: #e8f6ff; background: #1b4966; }
+.nav-icon { width: 17px; color: #81bed8; font: 15px/1 ui-monospace, monospace; text-align: center; }
 .eyebrow { color: #78a9c6; font-size: 10px; font-weight: 700; letter-spacing: 1.4px; }
 .header h1 { font-size: 20px; letter-spacing: -0.3px; margin-top: 2px; }
 .main {
@@ -386,15 +436,32 @@ body {
 .visuals { grid-area: visuals; display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-self: start; min-width: 0; }
 .visuals .console { grid-column: 1 / -1; }
 .right-rail { grid-area: rail; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
-@media (max-width: 1100px) {
+@media (max-width: 1500px) {
   .main { grid-template-columns: minmax(285px, 340px) minmax(430px, 1fr); grid-template-areas: "control visuals" "rail rail"; }
   .right-rail { display: grid; grid-template-columns: 1fr 1fr; }
   .visuals { grid-template-columns: 1fr; }
 }
-@media (max-width: 760px) {
-  .header, .main { padding-left: 16px; padding-right: 16px; }
-  .main { grid-template-columns: 1fr; grid-template-areas: "control" "visuals" "rail"; padding-top: 16px; }
+@media (max-width: 900px) {
+  .main { grid-template-columns: 1fr; grid-template-areas: "control" "visuals" "rail"; }
   .right-rail { display: flex; }
-  .header { align-items: flex-start; gap: 14px; }
+}
+@media (max-width: 760px) {
+  .app-layout { grid-template-columns: 124px minmax(0, 1fr); }
+  .workspace-sidebar { padding: 16px 8px; }
+  .workspace-tabs button { padding: 8px 7px; }
+  .header, .main { padding-left: 12px; padding-right: 12px; }
+  .main { padding-top: 16px; }
+  .header { align-items: flex-start; gap: 10px; flex-wrap: wrap; }
+}
+@media (max-width: 560px) {
+  .app-layout { grid-template-columns: 58px minmax(0, 1fr); }
+  .workspace-sidebar { padding: 12px 6px; }
+  .nav-label, .nav-text { display: none; }
+  .workspace-tabs button { justify-content: center; padding: 8px 4px; }
+  .nav-icon { width: auto; font-size: 18px; }
+  .header { padding: 10px; }
+  .header .page-context { width: 100%; }
+  .main { padding: 10px; gap: 10px; }
+  .panel { padding: 12px; }
 }
 </style>

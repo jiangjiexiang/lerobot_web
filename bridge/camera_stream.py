@@ -13,8 +13,8 @@ def main():
     p.add_argument("--camera-index", type=int, default=0)
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--jpeg-quality", type=int, default=82)
-    p.add_argument("--width", type=int, default=960)
-    p.add_argument("--height", type=int, default=540)
+    p.add_argument("--width", type=int, default=640)
+    p.add_argument("--height", type=int, default=360)
     args = p.parse_args()
 
     cap = cv2.VideoCapture(args.camera_index, cv2.CAP_V4L2)

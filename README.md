@@ -29,7 +29,7 @@ cd ~/lerobot_web
 ./start_robot.sh
 ```
 
-打开 `http://localhost:5173`。页面中确认串口和 ID 后启动遥操作；建议先选择“仅网页画面”。
+打开 `http://localhost:5173`。页面中确认串口和 ID 后启动遥操作；建议先选择“仅网页画面”。Vite 会把控制 API、WebSocket 和视频流代理到 Robot Server。
 
 默认启动为轻量模式：控制频率为 60 FPS，并开启机器人摄像头（15 FPS）。网页会枚举 `/dev/video*` 并允许选择摄像头。如需关闭摄像头，可使用 `ENABLE_CAMERA=0 ./start_robot.sh`。MuJoCo 已关闭，`STREAM_FPS` 不再启用仿真推流。
 
@@ -67,7 +67,7 @@ HTTPS_KEY="$PWD/.certs/lerobot-lan.key" \
 
 | 服务 | 地址 |
 | --- | --- |
-| 网页开发服务器 | `http://localhost:5173` |
+| 网页与数据平台 | `http://localhost:5173` |
 | Robot API | `http://localhost:43127` |
 | 控制 WebSocket | `ws://localhost:43127/ws/control` |
 | 推流 WebSocket | `ws://localhost:43127/ws/stream` |
@@ -98,12 +98,24 @@ ls /dev/ttyACM* /dev/ttyUSB*
 
 摄像头 JPEG 推流会占用网络和 CPU；若出现掉帧，降低 `CAMERA_FPS`。控制 WebSocket 与推流 WebSocket 已分离，视频拥塞不应阻塞控制指令。
 
+### 录制 LeRobot 数据集
+
+启动遥操作并确认两路摄像头都有实时画面后，在右侧“数据集录制”中填写数据集名称和任务描述。点击“开始录制”，完成后点击“停止并保存”；数据默认写入 `~/lerobot_datasets/<数据集名称>`，可用 `DATASET_ROOT` 修改根目录。同名数据集会在 FPS 和双摄像头分辨率一致时追加 episode。
+
+录制需要当前 Python 环境已安装 LeRobot 及其视频编码依赖。停止遥操作时，正在录制且已有数据帧的 episode 会自动保存；“丢弃”只清理本次尚未保存的 episode。
+
+页面顶部切换到“数据管理”（也可直接打开 `http://localhost:5173/#datasets`）后，可以浏览本地数据集和 episode、同步回放两路摄像头视频，并编辑审核状态、标签和备注。审核内容保存在数据集内的 `.lerobot-web/reviews.json`，不会改写原始 Parquet 或视频文件。
+
+通过审核的数据仍保留在原 Dataset。点击“发布已通过数据”会生成不可变训练选集，例如 `~/lerobot_datasets/<数据集>/.lerobot-web/collections/v001.json`。左侧“训练管理”（`http://localhost:5173/#training`）可检测 CPU、内存、磁盘和 CUDA/GPU，并基于该选集创建 ACT、Diffusion、SmolVLA 等训练任务。训练输出默认位于 `~/lerobot_datasets/.lerobot-web/training/outputs/<job-id>`。
+
 ## 项目结构
 
 ```text
 bridge/                 Python 串口、遥操作与摄像头桥接
   teleop_mujoco.py      当前单机遥操作主程序（MuJoCo 已禁用）
   leader_bridge.py      Leader 只读桥接（双电脑方案使用）
+  dataset_recorder.py   LeRobot 双摄像头 episode 录制器
+  dataset_catalog.py    数据集与 episode 元数据读取器
   models/               MuJoCo 模型与资源
 robot-server/           当前机器人端 API / WebSocket 服务
 operator-server/        双电脑操作端原型（待完成协议对接）

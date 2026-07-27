@@ -32,6 +32,21 @@ export interface DebugMetrics {
   streamConnected: boolean;
 }
 
+export interface RecordingStatus {
+  state: "idle" | "preparing" | "recording" | "saving" | "error";
+  dataset: string | null;
+  task: string | null;
+  fps: number;
+  frames: number;
+  episode: number | null;
+  path: string | null;
+  error: string | null;
+  plannedEpisodes: number;
+  episodeTime: number;
+  resetTime: number;
+  resume: boolean;
+}
+
 export function useWebSocket() {
   const connected = ref(false);
   const running = ref(false);
@@ -41,6 +56,10 @@ export function useWebSocket() {
   const camera2Frame = ref<string | null>(null);
   const logs = ref<string[]>([]);
   const fatalError = ref<string | null>(null);
+  const recording = ref<RecordingStatus>({
+    state: "idle", dataset: null, task: null, fps: 30, frames: 0,
+    episode: null, path: null, error: null, plannedEpisodes: 10, episodeTime: 20, resetTime: 5, resume: false,
+  });
   const metrics = ref<DebugMetrics>({
     controlFps: 0, controlLatency: null,
     cameraFps: 0, cameraLatency: null, cameraDropped: 0,
@@ -240,6 +259,22 @@ export function useWebSocket() {
         if (msg.leader) leaderJoints.value = msg.leader;
         if (msg.follower) followerJoints.value = msg.follower;
         break;
+      case "recording_status":
+        recording.value = {
+          state: msg.state as RecordingStatus["state"],
+          dataset: typeof msg.dataset === "string" ? msg.dataset : null,
+          task: typeof msg.task === "string" ? msg.task : null,
+          fps: typeof msg.fps === "number" ? msg.fps : 30,
+          frames: typeof msg.frames === "number" ? msg.frames : 0,
+          episode: typeof msg.episode === "number" ? msg.episode : null,
+          path: typeof msg.path === "string" ? msg.path : null,
+          error: typeof msg.error === "string" ? msg.error : null,
+          plannedEpisodes: typeof msg.plannedEpisodes === "number" ? msg.plannedEpisodes : 10,
+          episodeTime: typeof msg.episodeTime === "number" ? msg.episodeTime : 20,
+          resetTime: typeof msg.resetTime === "number" ? msg.resetTime : 5,
+          resume: msg.resume === true,
+        };
+        break;
     }
   }
 
@@ -278,6 +313,7 @@ export function useWebSocket() {
     camera2Frame,
     logs,
     fatalError,
+    recording,
     metrics,
     log,
     send,

@@ -1,5 +1,5 @@
 #!/bin/bash
-# SO-101 遥操作一键启动 (robot-server + Vite 前端)
+# 遥操作与数据平台一键启动（Robot Server + Vite）
 # 用法: ./start_robot.sh
 
 set -e
@@ -9,17 +9,24 @@ export PYTHON_PATH="${PYTHON_PATH:-/home/nvidia/miniconda3/envs/lerobot/bin/pyth
 export PORT="${PORT:-43127}"
 export ENABLE_CAMERA="${ENABLE_CAMERA:-1}"
 export CAMERA_FPS="${CAMERA_FPS:-30}"
+export CAMERA_WIDTH="${CAMERA_WIDTH:-640}"
+export CAMERA_HEIGHT="${CAMERA_HEIGHT:-360}"
 export STREAM_FPS="${STREAM_FPS:-0}"
 HTTPS_CERT="${HTTPS_CERT:-}"
 HTTPS_KEY="${HTTPS_KEY:-}"
+FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 
-echo "=== SO-101 遥操作一键启动 ==="
+echo "=== 遥操作与数据平台一键启动 ==="
 echo "Python: $PYTHON_PATH"
-echo "摄像头: 自动检测 USB 摄像头 ($CAMERA_FPS FPS)"
+echo "摄像头: 自动检测 USB 摄像头 (MJPG ${CAMERA_WIDTH}x${CAMERA_HEIGHT}@$CAMERA_FPS FPS)"
 
 # 清理上次异常退出后仍占用服务端口的进程。
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
     echo "错误: PORT 必须是 1-65535 之间的整数: $PORT"
+    exit 1
+fi
+if ! [[ "$FRONTEND_PORT" =~ ^[0-9]+$ ]] || [ "$FRONTEND_PORT" -lt 1 ] || [ "$FRONTEND_PORT" -gt 65535 ]; then
+    echo "错误: FRONTEND_PORT 必须是 1-65535 之间的整数: $FRONTEND_PORT"
     exit 1
 fi
 
@@ -94,8 +101,13 @@ fi
 chmod +x "$DIR/robot-server/node_modules/.bin/"* 2>/dev/null || true
 chmod +x "$DIR/frontend/node_modules/.bin/"* 2>/dev/null || true
 
+# Robot Server 会直接提供构建后的前端，本机模式不再依赖额外的 5173 代理。
+echo "[3/4] 构建 frontend..."
+cd "$DIR/frontend"
+npm run build
+
 # 后台启动 robot-server
-echo "[3/4] 启动 robot-server (端口 $PORT)..."
+echo "[4/4] 启动 robot-server (端口 $PORT)..."
 cd "$DIR/robot-server"
 npm run dev &
 BACKEND_PID=$!
@@ -122,15 +134,29 @@ for i in $(seq 1 20); do
     fi
 done
 
-# 前台启动 Vite (Ctrl+C 退出时同时关后端)
-echo "[4/4] 启动 Vite 前端 (端口 5173)..."
+# 清理失效或遗留的 Vite 进程，确保页面固定使用 FRONTEND_PORT。
+FRONTEND_PIDS="$(lsof -t -iTCP:"$FRONTEND_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+if [ -n "$FRONTEND_PIDS" ]; then
+    echo "清理端口 $FRONTEND_PORT 上的旧前端进程: $FRONTEND_PIDS"
+    kill $FRONTEND_PIDS 2>/dev/null || true
+    for _ in $(seq 1 20); do
+        if ! lsof -t -iTCP:"$FRONTEND_PORT" -sTCP:LISTEN >/dev/null 2>&1; then break; fi
+        sleep 0.1
+    done
+    FRONTEND_PIDS="$(lsof -t -iTCP:"$FRONTEND_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+    if [ -n "$FRONTEND_PIDS" ]; then
+        echo "旧前端进程未正常退出，强制清理: $FRONTEND_PIDS"
+        kill -9 $FRONTEND_PIDS 2>/dev/null || true
+    fi
+fi
+
 echo ""
 echo "========================================"
-echo "  浏览器打开: $WEB_SCHEME://localhost:5173"
+echo "  浏览器打开: $WEB_SCHEME://localhost:$FRONTEND_PORT"
 echo "  API 服务:   http://localhost:$PORT"
 echo "  Ctrl+C 退出"
 echo "========================================"
 echo ""
 
 cd "$DIR/frontend"
-npm run dev
+npm run dev -- --host 0.0.0.0 --port "$FRONTEND_PORT" --strictPort
