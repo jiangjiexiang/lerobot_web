@@ -378,6 +378,8 @@ interface DeploymentRevision {
   deployedAt: string;
   deployedBy: string;
   notes: string;
+  releaseGate: ReleaseGateResult | null;
+  overrideReason: string;
 }
 interface DeploymentTarget {
   id: string;
@@ -400,10 +402,32 @@ interface InferenceIncident {
   resolvedAt: string | null;
   resolution: string;
 }
+interface ReleaseGateConfig {
+  minEvaluatedEpisodes: number;
+  minSuccessRate: number;
+  minConfidenceLow: number;
+  blockOpenSeverity: "none" | "critical" | "error";
+  updatedAt: string | null;
+  updatedBy: string;
+}
+interface ReleaseGateCheck {
+  id: "evaluatedEpisodes" | "successRate" | "confidenceLow" | "openIncidents";
+  label: string;
+  passed: boolean;
+  actual: number;
+  threshold: number | null;
+}
+interface ReleaseGateResult {
+  ready: boolean;
+  checkedAt: string;
+  checks: ReleaseGateCheck[];
+  config: ReleaseGateConfig;
+}
 interface DeploymentStore {
-  schemaVersion: 1;
+  schemaVersion: 2;
   targets: DeploymentTarget[];
   incidents: InferenceIncident[];
+  releaseGate: ReleaseGateConfig;
 }
 
 type EvaluationState = "draft" | "running" | "stopping" | "completed" | "failed" | "cancelled";
@@ -478,12 +502,18 @@ function deploymentsFile(): string {
   return path.join(TRAINING_ROOT, "deployments.json");
 }
 
+function defaultReleaseGate(): ReleaseGateConfig {
+  return { minEvaluatedEpisodes: 10, minSuccessRate: 0.8, minConfidenceLow: 0.5, blockOpenSeverity: "error", updatedAt: null, updatedBy: "系统默认" };
+}
+
 function readDeploymentStore(): DeploymentStore {
   try {
     const value = JSON.parse(fs.readFileSync(deploymentsFile(), "utf-8"));
-    if (Array.isArray(value.targets) && Array.isArray(value.incidents)) return value;
+    if (Array.isArray(value.targets) && Array.isArray(value.incidents)) {
+      return { schemaVersion: 2, targets: value.targets, incidents: value.incidents, releaseGate: { ...defaultReleaseGate(), ...(value.releaseGate || {}) } };
+    }
   } catch { /* initialize below */ }
-  return { schemaVersion: 1, targets: [{ id: "local-robot", name: "本机机器人", currentRevisionId: null, updatedAt: null, revisions: [] }], incidents: [] };
+  return { schemaVersion: 2, targets: [{ id: "local-robot", name: "本机机器人", currentRevisionId: null, updatedAt: null, revisions: [] }], incidents: [], releaseGate: defaultReleaseGate() };
 }
 
 function writeDeploymentStore(store: DeploymentStore): void {
@@ -567,6 +597,34 @@ function summarizeEvaluation(job: EvaluationJob): Record<string, number | null> 
   const evaluated = success + failure; const successRate = evaluated ? success / evaluated : null;
   const { confidenceLow, confidenceHigh } = wilsonInterval(success, failure);
   return { total, reviewed: success + failure + invalid, success, failure, invalid, pending: total - success - failure - invalid, evaluated, successRate, confidenceLow, confidenceHigh };
+}
+
+function aggregateModelEvaluation(modelId: string): { jobs: number; episodes: number; success: number; failure: number; successRate: number | null; confidenceLow: number | null; confidenceHigh: number | null } {
+  const summaries = readEvaluationJobs().filter((job) => job.modelId === modelId).map(summarizeEvaluation).filter((summary) => Number(summary.total || 0) > 0);
+  const success = summaries.reduce((sum, item) => sum + Number(item.success || 0), 0);
+  const failure = summaries.reduce((sum, item) => sum + Number(item.failure || 0), 0);
+  const evaluated = success + failure;
+  return {
+    jobs: summaries.length,
+    episodes: summaries.reduce((sum, item) => sum + Number(item.total || 0), 0),
+    success,
+    failure,
+    successRate: evaluated ? success / evaluated : null,
+    ...wilsonInterval(success, failure),
+  };
+}
+
+function evaluateReleaseGate(modelId: string, store: DeploymentStore): ReleaseGateResult {
+  const evaluation = aggregateModelEvaluation(modelId); const evaluated = evaluation.success + evaluation.failure; const config = store.releaseGate;
+  const severities = config.blockOpenSeverity === "none" ? [] : config.blockOpenSeverity === "critical" ? ["critical"] : ["error", "critical"];
+  const openIncidents = store.incidents.filter((incident) => incident.modelId === modelId && incident.status === "open" && severities.includes(incident.severity)).length;
+  const checks: ReleaseGateCheck[] = [
+    { id: "evaluatedEpisodes", label: "有效评估 Episodes", passed: evaluated >= config.minEvaluatedEpisodes, actual: evaluated, threshold: config.minEvaluatedEpisodes },
+    { id: "successRate", label: "评估成功率", passed: evaluation.successRate !== null && evaluation.successRate >= config.minSuccessRate, actual: evaluation.successRate ?? 0, threshold: config.minSuccessRate },
+    { id: "confidenceLow", label: "95% 置信区间下界", passed: evaluation.confidenceLow !== null && evaluation.confidenceLow >= config.minConfidenceLow, actual: evaluation.confidenceLow ?? 0, threshold: config.minConfidenceLow },
+    { id: "openIncidents", label: "未关闭阻断异常", passed: openIncidents === 0, actual: openIncidents, threshold: 0 },
+  ];
+  return { ready: checks.every((check) => check.passed), checkedAt: new Date().toISOString(), checks, config: { ...config } };
 }
 
 function readRegisteredModels(): RegisteredModel[] {
@@ -767,7 +825,7 @@ function switchDeploymentLink(targetId: string, artifactPath: string): string {
   return current;
 }
 
-async function activateDeployment(targetId: string, model: RegisteredModel, input: { actor: string; notes: string; action: "deploy" | "rollback"; rollbackOf?: string | null }): Promise<DeploymentRevision> {
+async function activateDeployment(targetId: string, model: RegisteredModel, input: { actor: string; notes: string; action: "deploy" | "rollback"; rollbackOf?: string | null; releaseGate?: ReleaseGateResult | null; overrideReason?: string }): Promise<DeploymentRevision> {
   if (targetId !== "local-robot") throw new Error("未知部署目标");
   const { artifactPath } = await verifyDeploymentArtifact(model);
   const store = readDeploymentStore(); const target = store.targets.find((item) => item.id === targetId);
@@ -778,6 +836,7 @@ async function activateDeployment(targetId: string, model: RegisteredModel, inpu
     id: `deploy-${Date.now().toString(36)}`, targetId, modelId: model.id, modelName: model.name, modelVersion: model.version,
     artifactPath, sha256: model.sha256, action: input.action, rollbackOf: input.rollbackOf || null, status: "active",
     deployedAt: now, deployedBy: input.actor || "本地用户", notes: input.notes,
+    releaseGate: input.releaseGate || null, overrideReason: input.overrideReason || "",
   };
   switchDeploymentLink(targetId, artifactPath);
   target.revisions.unshift(revision); target.currentRevisionId = revision.id; target.updatedAt = now; writeDeploymentStore(store);
@@ -1281,20 +1340,31 @@ app.get("/api/training/jobs", (req, res) => {
 });
 
 app.get("/api/training/models", (req, res) => {
-  const evaluations = readEvaluationJobs();
-  const models = readRegisteredModels().map((model) => {
-    const summaries = evaluations.filter((job) => job.modelId === model.id).map(summarizeEvaluation).filter((summary) => Number(summary.total || 0) > 0);
-    const success = summaries.reduce((sum, item) => sum + Number(item.success || 0), 0);
-    const failure = summaries.reduce((sum, item) => sum + Number(item.failure || 0), 0);
-    const evaluated = success + failure;
-    return { ...model, evaluation: { jobs: summaries.length, episodes: summaries.reduce((sum, item) => sum + Number(item.total || 0), 0), success, failure, successRate: evaluated ? success / evaluated : null, ...wilsonInterval(success, failure) } };
-  });
+  const store = readDeploymentStore();
+  const models = readRegisteredModels().map((model) => ({ ...model, evaluation: aggregateModelEvaluation(model.id), deploymentGate: evaluateReleaseGate(model.id, store) }));
   res.json({ ok: true, models });
 });
 
 app.get("/api/training/deployments", (req, res) => {
   const store = readDeploymentStore();
-  res.json({ ok: true, targets: store.targets.map((target) => enrichDeploymentTarget(target, store.incidents)), incidents: store.incidents });
+  res.json({ ok: true, targets: store.targets.map((target) => enrichDeploymentTarget(target, store.incidents)), incidents: store.incidents, releaseGate: store.releaseGate });
+});
+
+app.patch("/api/training/deployment-gate", (req, res) => {
+  const minEvaluatedEpisodes = req.body?.minEvaluatedEpisodes;
+  const minSuccessRate = req.body?.minSuccessRate;
+  const minConfidenceLow = req.body?.minConfidenceLow;
+  const blockOpenSeverity = req.body?.blockOpenSeverity;
+  const validRate = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+  if (!Number.isInteger(minEvaluatedEpisodes) || minEvaluatedEpisodes < 0 || minEvaluatedEpisodes > 10000 || !validRate(minSuccessRate) || !validRate(minConfidenceLow) || !["none", "critical", "error"].includes(blockOpenSeverity)) {
+    res.status(400).json({ ok: false, error: "发布门禁参数无效" }); return;
+  }
+  const store = readDeploymentStore();
+  store.releaseGate = {
+    minEvaluatedEpisodes, minSuccessRate, minConfidenceLow, blockOpenSeverity,
+    updatedAt: new Date().toISOString(), updatedBy: cleanShortText(req.body?.actor, 80) || "本地用户",
+  };
+  writeDeploymentStore(store); res.json({ ok: true, releaseGate: store.releaseGate });
 });
 
 app.post("/api/training/deployments/:target/deploy", async (req, res) => {
@@ -1305,8 +1375,12 @@ app.post("/api/training/deployments/:target/deploy", async (req, res) => {
   if (!target) { res.status(404).json({ ok: false, error: "找不到部署目标" }); return; }
   const current = target.revisions.find((item) => item.id === target.currentRevisionId);
   if (current?.modelId === model.id) { res.status(409).json({ ok: false, error: "该模型已经是当前部署版本" }); return; }
+  const releaseGate = evaluateReleaseGate(model.id, store); const overrideReason = cleanShortText(req.body?.overrideReason, 500);
+  if (!releaseGate.ready && overrideReason.length < 10) {
+    res.status(412).json({ ok: false, error: "模型未通过发布门禁，受控放行必须填写至少 10 个字符的理由", releaseGate }); return;
+  }
   try {
-    const revision = await activateDeployment(target.id, model, { actor: cleanShortText(req.body?.actor, 80), notes: cleanShortText(req.body?.notes, 500), action: "deploy" });
+    const revision = await activateDeployment(target.id, model, { actor: cleanShortText(req.body?.actor, 80), notes: cleanShortText(req.body?.notes, 500), action: "deploy", releaseGate, overrideReason });
     res.status(201).json({ ok: true, revision });
   } catch (error) { res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
 });
