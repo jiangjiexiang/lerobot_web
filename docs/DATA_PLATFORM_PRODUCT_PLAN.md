@@ -124,9 +124,13 @@
 - 中断续训使用 `checkpoints/last/pretrained_model/train_config.json` 与 `--resume=true`。
 - 支持最多 4 个 Run 的参数、Loss、耗时和产物对比；最佳 Run 在同一 Dataset、训练选集和策略内唯一。
 - Checkpoint 可登记为版本化模型，记录来源 Run、Step、文件大小和 SHA-256，并支持 candidate、production、archived 生命周期。
+- 已登记模型可创建实时推理评估任务；评估使用独立 Dataset，绑定机械臂、双摄像头、任务描述、轮数与单轮/复位时间。
+- 评估命令沿用 `lerobot-record --policy.path=...`，本地保存且不上传 Hugging Face；失败或停止后使用 `--resume=true` 续录。
+- 评估启动前强制检查模型产物、Dataset 隔离、串口、双摄像头、PyTorch/CUDA、磁盘和设备独占状态。
+- 评估进程独占串口和摄像头；启动时释放 Web 摄像头进程，结束后自动恢复平台视频流。
 
 ## 后续训练闭环
 
-- 实时推理评估任务与评估 Dataset 隔离，避免覆盖训练数据。
-- 已登记模型与推理评估结果关联，按任务成功率选择生产版本。
+- 评估 Episode 审核结果与模型版本关联，统计任务成功率和失败原因。
+- 按任务成功率、运行稳定性和人工审核结果选择生产版本。
 - 模型部署、回滚和推理异常记录。

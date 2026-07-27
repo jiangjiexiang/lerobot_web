@@ -2,7 +2,7 @@
   <main class="training-workspace">
     <header class="training-head">
       <div><p class="eyebrow">MODEL TRAINING</p><h2>训练管理</h2></div>
-      <button class="refresh" title="刷新主机与任务状态" :disabled="loading" @click="refreshAll">↻</button>
+      <div class="head-actions"><div class="workspace-tabs" role="tablist"><button :class="{ active: workspaceMode === 'training' }" @click="workspaceMode = 'training'">训练实验</button><button :class="{ active: workspaceMode === 'evaluation' }" @click="workspaceMode = 'evaluation'">模型评估</button></div><button class="refresh" title="刷新主机与任务状态" :disabled="loading" @click="refreshAll">↻</button></div>
     </header>
 
     <div v-if="error" class="training-error">{{ error }}<button @click="error = null">×</button></div>
@@ -21,7 +21,7 @@
       <div><span>温度 {{ resources?.temperatureC ?? "-" }}°C</span><small>磁盘可用 {{ resources?.diskFreeGb ?? "-" }} GB</small></div>
     </section>
 
-    <div class="training-layout">
+    <div v-if="workspaceMode === 'training'" class="training-layout">
       <section class="config-pane" aria-label="新建训练任务">
         <div class="pane-heading"><div><p class="eyebrow">NEW JOB</p><h3>新建任务</h3></div><span>本地训练</span></div>
         <div class="form-grid">
@@ -114,11 +114,13 @@
         <div v-else class="empty">选择一个任务查看配置和日志</div>
       </section>
     </div>
+    <EvaluationWorkspace v-else @error="error = $event" />
   </main>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import EvaluationWorkspace from "./EvaluationWorkspace.vue";
 
 interface DatasetSummary { name: string; reviews: { approved: number } }
 interface Collection { id: string; name: string; episodes: { episode: number }[] }
@@ -144,6 +146,7 @@ const loading = ref(false);
 const creating = ref(false);
 const error = ref<string | null>(null);
 const metricMode = ref<"loss" | "gradNorm">("loss");
+const workspaceMode = ref<"training" | "evaluation">("training");
 const showArchived = ref(false);
 const checking = ref(false);
 const preflight = ref<Preflight | null>(null);
@@ -230,7 +233,7 @@ onUnmounted(() => { if (pollTimer) window.clearInterval(pollTimer); });
 </script>
 
 <style scoped>
-.training-workspace { container-type: inline-size; max-width: 1900px; margin: 0 auto; padding: 18px 24px 28px; }.training-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }.training-head h2 { margin-top: 2px; font-size: 20px; }.eyebrow { color: #78a9c6; font-size: 9px; font-weight: 700; letter-spacing: 1px; }.refresh { width: 32px; height: 32px; border: 1px solid #315574; border-radius: 5px; background: #102941; color: #8dd4f4; cursor: pointer; font-size: 18px; }
+.training-workspace { container-type: inline-size; max-width: 1900px; margin: 0 auto; padding: 18px 24px 28px; }.training-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }.training-head h2 { margin-top: 2px; font-size: 20px; }.eyebrow { color: #78a9c6; font-size: 9px; font-weight: 700; letter-spacing: 1px; }.head-actions { display: flex; align-items: center; gap: 8px; }.workspace-tabs { display: flex; padding: 2px; border: 1px solid #29435f; border-radius: 5px; background: #091522; }.workspace-tabs button { min-width: 72px; padding: 6px 9px; border: 0; border-radius: 3px; cursor: pointer; background: transparent; color: #70899c; font-size: 9px; }.workspace-tabs button.active { background: #1a344b; color: #b8d8e8; }.refresh { width: 32px; height: 32px; border: 1px solid #315574; border-radius: 5px; background: #102941; color: #8dd4f4; cursor: pointer; font-size: 18px; }
 .training-error { display: flex; justify-content: space-between; margin-bottom: 8px; padding: 8px 11px; border-left: 3px solid #ff7384; background: #25141b; color: #ffadb7; font-size: 10px; }.training-error button { border: 0; background: transparent; color: inherit; cursor: pointer; }
 .host-strip { display: grid; grid-template-columns: 1.35fr repeat(4,1fr); border: 1px solid rgba(151,188,222,.15); background: #0b1724; }.host-strip > div { display: grid; gap: 4px; min-width: 0; padding: 11px 13px; border-right: 1px solid rgba(151,188,222,.12); }.host-strip > div:last-child { border-right: 0; }.host-strip small { color: #7890a3; font-size: 8px; }.host-strip strong { overflow: hidden; color: #e7f1f7; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }.host-strip span { overflow: hidden; color: #587185; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }.host-strip .recommendation { background: #10251f; }.host-strip .recommendation strong { color: #72d2a5; }
 .live-resources { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; padding: 7px 12px; border: 1px solid rgba(151,188,222,.15); border-top: 0; background: #091522; }.live-resources > div { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 7px; min-width: 0; }.live-resources span,.live-resources small { color: #71899b; font-size: 8px; white-space: nowrap; }.live-resources i,.progress > i { display: block; height: 3px; overflow: hidden; background: #243646; }.live-resources i b,.progress > i b { display: block; height: 100%; background: #61bfdc; transition: width .3s ease; }.live-resources > div:last-child { display: flex; justify-content: space-between; }
@@ -247,5 +250,5 @@ onUnmounted(() => { if (pollTimer) window.clearInterval(pollTimer); });
 .metrics-panel,.checkpoint-panel,.model-panel { margin-top: 10px; border: 1px solid rgba(151,188,222,.13); background: #091522; }.metric-summary { display: grid; grid-template-columns: repeat(4,1fr); border-bottom: 1px solid rgba(151,188,222,.1); }.metric-summary span { display: grid; gap: 3px; padding: 8px; border-right: 1px solid rgba(151,188,222,.08); }.metric-summary span:last-child { border-right: 0; }.metric-summary small { color: #668095; font-size: 7px; }.metric-summary strong { color: #c8d8e2; font: 10px ui-monospace,monospace; }.chart-head,.checkpoint-panel > div,.model-panel > div { display: flex; align-items: center; justify-content: space-between; padding: 7px 9px; color: #8399aa; font-size: 8px; }.chart-head select { padding: 3px 5px; border: 1px solid #29435f; border-radius: 3px; background: #101f2e; color: #9cb0bf; font-size: 8px; }.metric-chart { display: block; width: 100%; height: 125px; background: #07111b; }.metric-chart line { stroke: #1c3040; stroke-width: 1; vector-effect: non-scaling-stroke; }.metric-chart polyline { fill: none; stroke: #64c9e8; stroke-width: 2; vector-effect: non-scaling-stroke; }.checkpoint-panel ul { max-height: 180px; overflow: auto; margin: 0; padding: 0; list-style: none; }.checkpoint-panel li { display: grid; grid-template-columns: minmax(120px,1fr) auto auto auto; align-items: center; gap: 8px; padding: 7px 9px; border-top: 1px solid rgba(151,188,222,.08); color: #a7bac6; font-size: 8px; }.checkpoint-panel li small,.checkpoint-panel li code { overflow: hidden; color: #6d8799; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }.checkpoint-panel li code { grid-column: 1/-1; }.checkpoint-panel p,.model-panel > p { margin: 0; padding: 12px 9px; border-top: 1px solid rgba(151,188,222,.08); color: #61798b; font-size: 8px; }.model-panel ul { margin: 0; padding: 0; list-style: none; }.model-panel li { display: grid; grid-template-columns: minmax(130px,1fr) auto auto auto; align-items: center; gap: 8px; padding: 8px 9px; border-top: 1px solid rgba(151,188,222,.08); }.model-panel li > span { display: grid; gap: 3px; min-width: 0; }.model-panel li strong { color: #afc3d0; font-size: 8px; }.model-panel li small,.model-panel li code { overflow: hidden; color: #658095; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }.model-panel li em { padding: 3px 5px; border-radius: 3px; color: #e1bf76; background: #352e1d; font-size: 7px; font-style: normal; }.model-panel li em.production { color: #65daa4; background: #173a31; }.model-panel li em.archived { color: #8a9ba8; background: #26323b; }.model-panel li button { border: 0; cursor: pointer; background: transparent; color: #76cdec; font-size: 8px; }
 .command,.logs { margin-top: 10px; border: 1px solid rgba(151,188,222,.13); background: #07111b; }.command > div,.logs > div { display: flex; align-items: center; justify-content: space-between; padding: 7px 9px; border-bottom: 1px solid rgba(151,188,222,.1); color: #8399aa; font-size: 8px; }.command button { border: 0; cursor: pointer; background: transparent; color: #76cdec; font-size: 8px; }.command code { display: block; max-height: 100px; overflow: auto; padding: 9px; color: #9fbdce; font: 8px/1.6 ui-monospace,monospace; white-space: pre-wrap; overflow-wrap: anywhere; }.logs pre { min-height: 160px; max-height: 310px; overflow: auto; margin: 0; padding: 9px; color: #91aa98; font: 8px/1.55 ui-monospace,monospace; white-space: pre-wrap; }.job-error { margin-top: 8px; color: #ff91a0; font-size: 9px; }.empty { display: grid; place-items: center; min-height: 180px; color: #667f92; font-size: 9px; }
 @container (max-width: 1100px) { .host-strip { grid-template-columns: repeat(3,1fr); }.host-strip > div:nth-child(3) { border-right: 0; }.training-layout { grid-template-columns: 300px 1fr; }.config-pane { grid-row: 1/span 2; }.jobs-pane { border-right: 0; border-bottom: 1px solid rgba(151,188,222,.13); }.job-detail { grid-column: 2; } }
-@container (max-width: 720px) { .training-workspace { padding: 10px; }.host-strip { grid-template-columns: 1fr 1fr; }.host-strip > div { border-bottom: 1px solid rgba(151,188,222,.12); }.live-resources { grid-template-columns: 1fr 1fr; }.training-layout { display: block; }.config-pane,.jobs-pane { border-right: 0; border-bottom: 1px solid rgba(151,188,222,.13); }.job-detail { min-height: 360px; }.metric-summary { grid-template-columns: 1fr 1fr; } }
+@container (max-width: 720px) { .training-workspace { padding: 10px; }.training-head { align-items: flex-start; }.head-actions { align-items: flex-end; flex-direction: column-reverse; }.workspace-tabs button { min-width: 62px; padding-inline: 6px; }.host-strip { grid-template-columns: 1fr 1fr; }.host-strip > div { border-bottom: 1px solid rgba(151,188,222,.12); }.live-resources { grid-template-columns: 1fr 1fr; }.training-layout { display: block; }.config-pane,.jobs-pane { border-right: 0; border-bottom: 1px solid rgba(151,188,222,.13); }.job-detail { min-height: 360px; }.metric-summary { grid-template-columns: 1fr 1fr; } }
 </style>

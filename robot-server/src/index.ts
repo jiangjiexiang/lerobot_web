@@ -364,6 +364,36 @@ interface RegisteredModel {
   updatedAt: string;
 }
 
+type EvaluationState = "draft" | "running" | "stopping" | "completed" | "failed" | "cancelled";
+interface EvaluationJob {
+  id: string;
+  name: string;
+  modelId: string;
+  modelName: string;
+  modelVersion: number;
+  evalDataset: string;
+  task: string;
+  followerPort: string;
+  followerId: string;
+  leaderPort: string;
+  leaderId: string;
+  cameraIndices: [number, number];
+  device: "cuda" | "cpu";
+  numEpisodes: number;
+  episodeTime: number;
+  resetTime: number;
+  state: EvaluationState;
+  attempts: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  outputDatasetPath: string;
+  command: string[];
+  exitCode: number | null;
+  error: string | null;
+  logs: string[];
+}
+
 interface PreflightCheck {
   id: string;
   label: string;
@@ -372,6 +402,7 @@ interface PreflightCheck {
 }
 
 const trainingProcesses = new Map<string, ChildProcess>();
+const evaluationProcesses = new Map<string, ChildProcess>();
 
 function trainingJobsFile(): string {
   return path.join(TRAINING_ROOT, "jobs.json");
@@ -379,6 +410,34 @@ function trainingJobsFile(): string {
 
 function modelRegistryFile(): string {
   return path.join(TRAINING_ROOT, "models.json");
+}
+
+function evaluationJobsFile(): string {
+  return path.join(TRAINING_ROOT, "evaluations.json");
+}
+
+function readEvaluationJobs(): EvaluationJob[] {
+  try {
+    const value = JSON.parse(fs.readFileSync(evaluationJobsFile(), "utf-8"));
+    return Array.isArray(value.jobs) ? value.jobs : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeEvaluationJobs(jobs: EvaluationJob[]): void {
+  fs.mkdirSync(TRAINING_ROOT, { recursive: true });
+  const target = evaluationJobsFile();
+  const temporary = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify({ jobs }, null, 2) + "\n", "utf-8");
+  fs.renameSync(temporary, target);
+}
+
+function updateEvaluationJob(id: string, update: (job: EvaluationJob) => void): EvaluationJob | null {
+  const jobs = readEvaluationJobs();
+  const job = jobs.find((item) => item.id === id);
+  if (!job) return null;
+  update(job); writeEvaluationJobs(jobs); return job;
 }
 
 function readRegisteredModels(): RegisteredModel[] {
@@ -505,6 +564,20 @@ function runPythonCheck(script: string): Promise<{ ok: boolean; output: string }
   }));
 }
 
+function analyzeJpegFrame(frame: Buffer): Promise<{ mean: number; blackRatio: number } | null> {
+  const script = "import sys,json,cv2,numpy as np; a=np.frombuffer(sys.stdin.buffer.read(),np.uint8); im=cv2.imdecode(a,cv2.IMREAD_GRAYSCALE); print(json.dumps({'mean':round(float(im.mean()),1),'blackRatio':round(float((im<8).mean()),3)})) if im is not None else sys.exit(2)";
+  return new Promise((resolve) => {
+    const child = spawn(PYTHON_PATH, ["-c", script], { stdio: ["pipe", "pipe", "ignore"] });
+    let output = ""; let settled = false;
+    const finish = (value: { mean: number; blackRatio: number } | null) => { if (!settled) { settled = true; resolve(value); } };
+    const timer = setTimeout(() => { child.kill("SIGKILL"); finish(null); }, 5000); timer.unref();
+    child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString("utf-8"); });
+    child.on("exit", (code) => { clearTimeout(timer); if (code !== 0) { finish(null); return; } try { finish(JSON.parse(output)); } catch { finish(null); } });
+    child.on("error", () => { clearTimeout(timer); finish(null); });
+    child.stdin?.end(frame);
+  });
+}
+
 async function trainingPreflight(job: TrainingJob): Promise<{ ready: boolean; checks: PreflightCheck[]; checkedAt: string }> {
   const checks: PreflightCheck[] = [];
   const datasetRoot = datasetPath(job.dataset);
@@ -531,6 +604,7 @@ async function trainingPreflight(job: TrainingJob): Promise<{ ready: boolean; ch
   const memoryFreeGb = (os.totalmem() - os.freemem()) / 1024 ** 3;
   checks.push({ id: "disk", label: "磁盘空间", status: resources.diskFreeGb >= 5 ? "pass" : resources.diskFreeGb >= 2 ? "warning" : "fail", detail: `可用 ${resources.diskFreeGb} GB，建议至少保留 5 GB` });
   checks.push({ id: "memory", label: "可用内存", status: memoryFreeGb >= 2 ? "pass" : memoryFreeGb >= 1 ? "warning" : "fail", detail: `可用 ${memoryFreeGb.toFixed(1)} GB` });
+  checks.push({ id: "exclusive", label: "设备占用", status: evaluationProcesses.size === 0 ? "pass" : "fail", detail: evaluationProcesses.size === 0 ? "没有评估任务占用设备" : "评估任务正在运行" });
   return { ready: !checks.some((check) => check.status === "fail"), checks, checkedAt: new Date().toISOString() };
 }
 
@@ -582,7 +656,7 @@ function resourceSample(): Record<string, unknown> {
 }
 
 function startTrainingJob(job: TrainingJob): void {
-  if (trainingProcesses.size > 0) throw new Error("已有训练任务正在运行");
+  if (trainingProcesses.size > 0 || evaluationProcesses.size > 0) throw new Error("已有训练或评估任务正在运行");
   fs.mkdirSync(path.dirname(job.outputDir), { recursive: true });
   job.state = "running";
   job.startedAt = new Date().toISOString();
@@ -615,6 +689,114 @@ function startTrainingJob(job: TrainingJob): void {
       const wasStopping = current.state === "stopping";
       current.state = code === 0 ? "completed" : wasStopping ? "cancelled" : "failed";
       if (code !== 0 && !wasStopping && !current.error) current.error = signal ? `训练进程被 ${signal} 终止` : `训练进程退出码 ${code}`;
+    });
+  });
+}
+
+function buildEvaluationCommand(job: EvaluationJob, model: RegisteredModel): string[] {
+  const cameras = {
+    wrist: { type: "opencv", index_or_path: job.cameraIndices[0], width: CAMERA_WIDTH, height: CAMERA_HEIGHT, fps: CAMERA_FPS },
+    front: { type: "opencv", index_or_path: job.cameraIndices[1], width: CAMERA_WIDTH, height: CAMERA_HEIGHT, fps: CAMERA_FPS },
+  };
+  const command = [
+    "-m", "lerobot.scripts.lerobot_record",
+    "--robot.type=so101_follower", `--robot.port=${job.followerPort}`, `--robot.id=${job.followerId}`,
+    "--robot.disable_torque_on_disconnect=true", `--robot.cameras=${JSON.stringify(cameras)}`,
+    "--teleop.type=so101_leader", `--teleop.port=${job.leaderPort}`, `--teleop.id=${job.leaderId}`,
+    "--display_data=false", `--dataset.single_task=${job.task}`,
+    `--policy.path=${path.dirname(model.modelPath)}`, `--policy.device=${job.device}`,
+    `--dataset.repo_id=local/${job.evalDataset}`, `--dataset.root=${job.outputDatasetPath}`,
+    "--dataset.push_to_hub=false", `--dataset.num_episodes=${job.numEpisodes}`,
+    `--dataset.episode_time_s=${job.episodeTime}`, `--dataset.reset_time_s=${job.resetTime}`,
+  ];
+  if (job.attempts > 0) command.push("--resume=true");
+  return command;
+}
+
+async function evaluationPreflight(job: EvaluationJob): Promise<{ ready: boolean; checks: PreflightCheck[]; checkedAt: string }> {
+  const checks: PreflightCheck[] = [];
+  const model = readRegisteredModels().find((item) => item.id === job.modelId);
+  const modelReady = Boolean(model && fs.existsSync(model.modelPath) && fs.existsSync(path.join(path.dirname(model.modelPath), "config.json")));
+  checks.push({ id: "model", label: "模型产物", status: modelReady ? "pass" : "fail", detail: modelReady ? `${model!.name} v${model!.version} · ${model!.stage}` : "模型文件或 config.json 不存在" });
+
+  const trainingDatasetConflict = model?.dataset === job.evalDataset;
+  const datasetExists = fs.existsSync(path.join(job.outputDatasetPath, "meta", "info.json"));
+  const datasetAllowed = !trainingDatasetConflict && (!datasetExists || job.attempts > 0);
+  checks.push({ id: "dataset", label: "评估数据集", status: datasetAllowed ? "pass" : "fail", detail: trainingDatasetConflict ? "评估 Dataset 不能与训练 Dataset 同名" : datasetExists && job.attempts === 0 ? "Dataset 已存在，请使用新名称" : `${job.evalDataset} 与训练数据隔离` });
+
+  const portsReady = job.followerPort !== job.leaderPort && fs.existsSync(job.followerPort) && fs.existsSync(job.leaderPort);
+  checks.push({ id: "serial", label: "机械臂串口", status: portsReady ? "pass" : "fail", detail: portsReady ? `${job.followerPort} / ${job.leaderPort}` : "Follower、Leader 串口必须存在且不能相同" });
+
+  const now = Date.now();
+  const cameraStreamsReady = job.cameraIndices[0] !== job.cameraIndices[1]
+    && job.cameraIndices[0] === activeCameraIndex && job.cameraIndices[1] === activeCameraIndex2
+    && now - cameraLastFrameAt < 2000 && now - camera2LastFrameAt < 2000;
+  let cameraDetail = "两路摄像头必须映射正确并持续产生实时帧";
+  let camerasReady = cameraStreamsReady;
+  if (cameraStreamsReady && latestCameraFrame && latestCamera2Frame) {
+    const [first, second] = await Promise.all([analyzeJpegFrame(latestCameraFrame), analyzeJpegFrame(latestCamera2Frame)]);
+    camerasReady = Boolean(first && second && first.mean >= 5 && second.mean >= 5 && first.blackRatio < .98 && second.blackRatio < .98);
+    cameraDetail = first && second
+      ? `/dev/video${job.cameraIndices[0]} 亮度 ${first.mean} / /dev/video${job.cameraIndices[1]} 亮度 ${second.mean}${camerasReady ? ` · MJPG ${CAMERA_WIDTH}x${CAMERA_HEIGHT}@${CAMERA_FPS}` : " · 检测到黑屏"}`
+      : "无法解析摄像头画面";
+  }
+  checks.push({ id: "cameras", label: "双摄像头画面", status: camerasReady ? "pass" : "fail", detail: cameraDetail });
+
+  const runtime = await runPythonCheck("import lerobot,torch; print(torch.__version__)");
+  checks.push({ id: "runtime", label: "推理环境", status: runtime.ok ? "pass" : "fail", detail: runtime.ok ? `PyTorch ${runtime.output}` : runtime.output || "无法导入 lerobot/torch" });
+  if (job.device === "cuda") {
+    const cuda = await runPythonCheck("import torch; print(torch.cuda.is_available())");
+    const available = cuda.ok && cuda.output.split(/\s+/).pop() === "True";
+    checks.push({ id: "device", label: "推理设备", status: available ? "pass" : "fail", detail: available ? "CUDA 可用" : "任务要求 CUDA，但当前 PyTorch 无 CUDA" });
+  } else {
+    checks.push({ id: "device", label: "推理设备", status: "warning", detail: "使用 CPU 推理，动作频率可能不足" });
+  }
+
+  const idle = evaluationProcesses.size === 0 && trainingProcesses.size === 0 && !bridge?.isRunning() && !recordingIsActive();
+  checks.push({ id: "exclusive", label: "设备独占", status: idle ? "pass" : "fail", detail: idle ? "遥操作、录制和训练均已停止" : "请先停止遥操作、录制、训练或其他评估任务" });
+  const resources = resourceSample() as { diskFreeGb: number };
+  checks.push({ id: "disk", label: "磁盘空间", status: resources.diskFreeGb >= 2 ? "pass" : "fail", detail: `可用 ${resources.diskFreeGb} GB` });
+  return { ready: !checks.some((check) => check.status === "fail"), checks, checkedAt: new Date().toISOString() };
+}
+
+function restoreCameraStreams(indices: [number, number]): void {
+  setTimeout(() => {
+    if (evaluationProcesses.size > 0 || !ENABLE_CAMERA) return;
+    startCamera(indices[0]); startCamera2(indices[1]);
+  }, 1000).unref();
+}
+
+async function startEvaluationJob(job: EvaluationJob): Promise<void> {
+  if (evaluationProcesses.size > 0 || trainingProcesses.size > 0) throw new Error("已有训练或评估任务正在运行");
+  const model = readRegisteredModels().find((item) => item.id === job.modelId);
+  if (!model) throw new Error("已登记模型不存在");
+  job.command = buildEvaluationCommand(job, model);
+  job.state = "running"; job.startedAt = new Date().toISOString(); job.finishedAt = null; job.error = null; job.attempts += 1;
+  writeEvaluationJobs(readEvaluationJobs().map((item) => item.id === job.id ? job : item));
+
+  cameraBridge?.stop(); cameraBridge2?.stop();
+  await new Promise((resolve) => setTimeout(resolve, 2200));
+  const child = spawn(PYTHON_PATH, job.command, { cwd: path.join(__dirname, "../.."), env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+  evaluationProcesses.set(job.id, child);
+  let logBuffer = "";
+  const consume = (chunk: Buffer) => {
+    logBuffer += chunk.toString("utf-8").replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/\r/g, "\n");
+    const lines = logBuffer.split(/\r?\n/); logBuffer = lines.pop() || "";
+    if (lines.length) updateEvaluationJob(job.id, (current) => { current.logs.push(...lines.map((line) => line.trimEnd()).filter(Boolean)); current.logs = current.logs.slice(-500); });
+  };
+  child.stdout?.on("data", consume); child.stderr?.on("data", consume);
+  child.on("error", (error) => {
+    evaluationProcesses.delete(job.id); restoreCameraStreams(job.cameraIndices);
+    updateEvaluationJob(job.id, (current) => { current.state = "failed"; current.error = error.message; current.finishedAt = new Date().toISOString(); });
+  });
+  child.on("exit", (code, signal) => {
+    evaluationProcesses.delete(job.id); restoreCameraStreams(job.cameraIndices);
+    updateEvaluationJob(job.id, (current) => {
+      if (logBuffer.trim()) current.logs.push(logBuffer.trim());
+      current.exitCode = code; current.finishedAt = new Date().toISOString();
+      const wasStopping = current.state === "stopping";
+      current.state = code === 0 ? "completed" : wasStopping ? "cancelled" : "failed";
+      if (code !== 0 && !wasStopping && !current.error) current.error = signal ? `评估进程被 ${signal} 终止` : `评估进程退出码 ${code}`;
     });
   });
 }
@@ -924,6 +1106,87 @@ app.get("/api/training/models", (req, res) => {
   res.json({ ok: true, models: readRegisteredModels() });
 });
 
+app.get("/api/training/evaluations", (req, res) => {
+  const jobs = readEvaluationJobs();
+  let changed = false;
+  for (const job of jobs) {
+    if ((job.state === "running" || job.state === "stopping") && !evaluationProcesses.has(job.id)) {
+      job.state = "failed"; job.finishedAt = new Date().toISOString(); job.error = "服务重启，评估进程状态已丢失"; changed = true;
+    }
+  }
+  if (changed) writeEvaluationJobs(jobs);
+  res.json({ ok: true, jobs });
+});
+
+app.post("/api/training/evaluations", (req, res) => {
+  const model = readRegisteredModels().find((item) => item.id === req.body?.modelId);
+  const name = cleanShortText(req.body?.name, 80);
+  const evalDataset = cleanDatasetName(req.body?.evalDataset);
+  const task = cleanShortText(req.body?.task, 200);
+  const followerPort = typeof req.body?.followerPort === "string" && /^\/dev\/[A-Za-z0-9._-]+$/.test(req.body.followerPort) ? req.body.followerPort : null;
+  const leaderPort = typeof req.body?.leaderPort === "string" && /^\/dev\/[A-Za-z0-9._-]+$/.test(req.body.leaderPort) ? req.body.leaderPort : null;
+  const followerId = typeof req.body?.followerId === "string" && /^[A-Za-z0-9_-]+$/.test(req.body.followerId) ? req.body.followerId : null;
+  const leaderId = typeof req.body?.leaderId === "string" && /^[A-Za-z0-9_-]+$/.test(req.body.leaderId) ? req.body.leaderId : null;
+  const firstCamera = Number(req.body?.cameraIndices?.[0]); const secondCamera = Number(req.body?.cameraIndices?.[1]);
+  const device = req.body?.device === "cuda" ? "cuda" : "cpu";
+  const numEpisodes = Number(req.body?.numEpisodes); const episodeTime = Number(req.body?.episodeTime); const resetTime = Number(req.body?.resetTime);
+  if (!model || !name || !evalDataset || !task || !followerPort || !leaderPort || !followerId || !leaderId
+      || followerPort === leaderPort || model.dataset === evalDataset
+      || !Number.isInteger(firstCamera) || !Number.isInteger(secondCamera) || firstCamera < 0 || secondCamera < 0 || firstCamera === secondCamera
+      || !Number.isInteger(numEpisodes) || numEpisodes < 1 || numEpisodes > 1000
+      || !Number.isInteger(episodeTime) || episodeTime < 1 || episodeTime > 3600
+      || !Number.isInteger(resetTime) || resetTime < 0 || resetTime > 3600) {
+    res.status(400).json({ ok: false, error: "评估任务参数无效，评估 Dataset 必须与训练 Dataset 不同" }); return;
+  }
+  const outputDatasetPath = datasetPath(evalDataset);
+  if (readEvaluationJobs().some((job) => job.evalDataset === evalDataset)) { res.status(409).json({ ok: false, error: "评估 Dataset 已被其他任务使用，请使用新的名称" }); return; }
+  if (fs.existsSync(path.join(outputDatasetPath, "meta", "info.json"))) { res.status(409).json({ ok: false, error: "评估 Dataset 已存在，请使用新的名称" }); return; }
+  const id = `eval-${Date.now().toString(36)}`;
+  const job: EvaluationJob = {
+    id, name, modelId: model.id, modelName: model.name, modelVersion: model.version, evalDataset, task,
+    followerPort, followerId, leaderPort, leaderId, cameraIndices: [firstCamera, secondCamera], device,
+    numEpisodes, episodeTime, resetTime, state: "draft", attempts: 0, createdAt: new Date().toISOString(),
+    startedAt: null, finishedAt: null, outputDatasetPath, command: [], exitCode: null, error: null, logs: [],
+  };
+  job.command = buildEvaluationCommand(job, model);
+  const jobs = readEvaluationJobs(); jobs.unshift(job); writeEvaluationJobs(jobs);
+  res.status(201).json({ ok: true, job });
+});
+
+app.get("/api/training/evaluations/:job/preflight", async (req, res) => {
+  const job = readEvaluationJobs().find((item) => item.id === req.params.job);
+  if (!job) { res.status(404).json({ ok: false, error: "找不到评估任务" }); return; }
+  try { res.json({ ok: true, ...await evaluationPreflight(job) }); }
+  catch (error) { res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/training/evaluations/:job/start", async (req, res) => {
+  const job = readEvaluationJobs().find((item) => item.id === req.params.job);
+  if (!job) { res.status(404).json({ ok: false, error: "找不到评估任务" }); return; }
+  if (!["draft", "failed", "cancelled"].includes(job.state)) { res.status(409).json({ ok: false, error: "只有草稿、失败或已停止任务可以启动" }); return; }
+  try {
+    const preflight = await evaluationPreflight(job);
+    if (!preflight.ready) { res.status(409).json({ ok: false, error: "评估启动前检查未通过", preflight }); return; }
+    await startEvaluationJob(job); res.json({ ok: true, job, preflight });
+  } catch (error) { res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/training/evaluations/:job/stop", (req, res) => {
+  const child = evaluationProcesses.get(req.params.job);
+  if (!child) { res.status(409).json({ ok: false, error: "评估任务未运行" }); return; }
+  const job = updateEvaluationJob(req.params.job, (current) => { current.state = "stopping"; });
+  child.kill("SIGTERM"); res.json({ ok: true, job });
+});
+
+app.delete("/api/training/evaluations/:job", (req, res) => {
+  const jobs = readEvaluationJobs();
+  const job = jobs.find((item) => item.id === req.params.job);
+  if (!job) { res.status(404).json({ ok: false, error: "找不到评估任务" }); return; }
+  if (job.state !== "draft" || job.attempts > 0 || fs.existsSync(job.outputDatasetPath)) { res.status(409).json({ ok: false, error: "只能删除从未启动且没有输出数据的草稿" }); return; }
+  writeEvaluationJobs(jobs.filter((item) => item.id !== job.id));
+  res.json({ ok: true, deleted: job.id });
+});
+
 app.post("/api/training/jobs", (req, res) => {
   const dataset = cleanDatasetName(req.body.dataset);
   const collectionId = typeof req.body.collection === "string" && /^v\d{3}$/.test(req.body.collection) ? req.body.collection : null;
@@ -1123,6 +1386,10 @@ app.post("/api/training/jobs/:job/resume", (req, res) => {
 });
 
 app.post("/api/recording/start", (req, res) => {
+  if (evaluationProcesses.size > 0) {
+    res.status(409).json({ ok: false, error: "模型评估正在占用机械臂和摄像头" });
+    return;
+  }
   if (!bridge?.isRunning() || stopping) {
     res.status(409).json({ ok: false, error: "请先启动遥操作" });
     return;
@@ -1310,11 +1577,11 @@ app.get("/api/self-check", (req, res) => {
   const followerId = typeof req.query.follower_id === "string" ? req.query.follower_id : "R12253102";
   const now = Date.now();
   const detected = detectUsbCameraIndices();
-  let acmPorts: string[] = [];
+  let serialPorts: string[] = [];
   try {
-    acmPorts = fs.readdirSync("/dev")
-      .filter((name) => /^ttyACM\d+$/.test(name))
-      .sort((a, b) => Number(a.slice(6)) - Number(b.slice(6)))
+    serialPorts = fs.readdirSync("/dev")
+      .filter((name) => /^tty(?:ACM|USB)\d+$/.test(name))
+      .sort()
       .map((name) => `/dev/${name}`);
   } catch { /* /dev unavailable */ }
   const calibrationPath = /^[A-Za-z0-9_-]+$/.test(followerId)
@@ -1343,8 +1610,8 @@ app.get("/api/self-check", (req, res) => {
     checkedAt: new Date(now).toISOString(),
     server: { ok: true, running: bridge ? bridge.isRunning() && !stopping : false },
     follower: {
-      ports: acmPorts,
-      portPresent: acmPorts.length > 0,
+      ports: serialPorts,
+      portPresent: serialPorts.length > 0,
       id: followerId,
       calibrationValid,
     },
@@ -1373,6 +1640,10 @@ app.get("/api/calibration/leader/:id", (req, res) => {
 
 // 启动遥操作
 app.post("/api/start", (req, res) => {
+  if (evaluationProcesses.size > 0) {
+    res.status(409).json({ ok: false, error: "模型评估正在占用机械臂和摄像头" });
+    return;
+  }
   if (bridge && bridge.isRunning()) {
     res.status(400).json({ ok: false, error: stopping ? "正在停止，请稍候" : "已在运行中" });
     return;
@@ -1499,6 +1770,10 @@ app.get("/api/status", (req, res) => {
 
 // 切换摄像头
 app.post("/api/camera/switch", (req, res) => {
+  if (evaluationProcesses.size > 0) {
+    res.status(409).json({ ok: false, error: "模型评估期间不能切换摄像头" });
+    return;
+  }
   if (recordingIsActive()) {
     res.status(409).json({ ok: false, error: "录制期间不能切换摄像头" });
     return;
@@ -1664,6 +1939,8 @@ function shutdown(): void {
   if (cameraBridge) cameraBridge.stop();
   if (cameraBridge2) cameraBridge2.stop();
   if (recorder) recorder.stop();
+  for (const child of trainingProcesses.values()) child.kill("SIGTERM");
+  for (const child of evaluationProcesses.values()) child.kill("SIGTERM");
   if (controlDisconnectTimer) clearTimeout(controlDisconnectTimer);
   for (const client of clients) client.close();
   server.close();

@@ -13,7 +13,7 @@
         </div>
         <div v-else-if="selfCheck?.server?.ok" class="self-check-results">
           <p :class="selfCheck?.server?.ok ? 'ok' : 'bad'">{{ selfCheck?.server?.ok ? '✓ Robot Server 正常' : '✕ Robot Server 无响应' }}</p>
-          <p :class="selfCheck?.follower?.portPresent ? 'ok' : 'bad'">{{ selfCheck?.follower?.portPresent ? `✓ 检测到 ACM 串口 (${selfCheck.follower.ports.join(', ')})` : '✕ 未检测到任何 /dev/ttyACM* 串口' }}</p>
+          <p :class="selfCheck?.follower?.portPresent ? 'ok' : 'bad'">{{ selfCheck?.follower?.portPresent ? `✓ 检测到机械臂串口 (${selfCheck.follower.ports.join(', ')})` : '✕ 未检测到 ttyACM / ttyUSB 串口' }}</p>
           <p :class="selfCheck?.follower?.calibrationValid ? 'ok' : 'warn'">{{ selfCheck?.follower?.calibrationValid ? `✓ Follower 标定有效 (${selfCheck.follower.id})` : `! Follower 标定缺失或无效 (${selfCheck?.follower?.id || '-'})` }}</p>
           <p v-for="(camera, index) in selfCheck?.cameras || []" :key="index" :class="camera.frameFresh ? 'ok' : 'bad'">{{ camera.frameFresh ? `✓ 摄像头 ${index + 1} 正常 (/dev/video${camera.index})` : `✕ 摄像头 ${index + 1} 无画面${camera.index >= 0 ? ` (/dev/video${camera.index})` : ''}` }}</p>
         </div>
