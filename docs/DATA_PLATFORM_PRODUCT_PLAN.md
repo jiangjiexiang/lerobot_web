@@ -26,6 +26,25 @@
 - Foxglove search and events: <https://docs.foxglove.dev/docs/data/search>, <https://docs.foxglove.dev/docs/data/events>
 - FiftyOne App: <https://docs.voxel51.com/user_guide/app.html>
 
+## 训练平台能力矩阵
+
+| 能力 | W&B | MLflow | ClearML | Kubeflow Trainer | 当前平台 |
+| --- | --- | --- | --- | --- | --- |
+| 实验与 Run | Experiments / Runs | Experiments / Runs | Task / Experiment | TrainJob | 训练任务与状态队列 |
+| 参数记录 | Config | Parameters | Configuration | Runtime spec | Dataset、选集、策略与超参数 |
+| 指标曲线 | Metrics / Panels | Metrics | Scalars / Plots | 依赖观测系统 | Step、Loss、Grad norm、LR |
+| 系统资源 | System metrics | 可接监控 | Resource monitoring | CPU/GPU resources | CPU、内存、GPU、温度、磁盘 |
+| 模型产物 | Artifacts | Artifacts / Models | Models / Artifacts | Volume / Registry 对接 | Checkpoint 与输出目录 |
+| 任务调度 | Launch / Sweeps | Projects 扩展 | Queue / Agent | 分布式 Runtime | 单机串行队列，后续加 Agent |
+| 恢复与比较 | Resume / Compare | Run compare | Clone / Continue | Job restart | Checkpoint 续训，待加跨任务比较 |
+
+参考资料：
+
+- W&B experiment tracking: <https://docs.wandb.ai/models/track/>
+- MLflow Tracking: <https://mlflow.org/docs/latest/ml/tracking/>
+- ClearML Task: <https://clear.ml/docs/latest/docs/fundamentals/task/>
+- Kubeflow Trainer: <https://www.kubeflow.org/docs/components/trainer/overview/>
+
 ## 数据模型
 
 ### Dataset
@@ -106,7 +125,7 @@
 
 ## 后续训练闭环
 
-- 从日志解析 step、loss、gradient norm、learning rate 和吞吐率曲线。
-- Checkpoint 浏览、指标比较、模型版本登记。
+- 跨任务指标对比、最佳 Run 标记和参数差异视图。
+- Checkpoint 模型版本登记与推理评估关联。
 - 实时推理评估任务与评估 Dataset 隔离，避免覆盖训练数据。
 - 模型部署、回滚和推理异常记录。

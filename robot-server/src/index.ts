@@ -304,7 +304,17 @@ function readAudit(root: string): Record<string, unknown>[] {
   }
 }
 
-type TrainingState = "draft" | "running" | "stopping" | "completed" | "failed";
+type TrainingState = "draft" | "running" | "stopping" | "completed" | "failed" | "cancelled";
+interface TrainingMetric {
+  step: number;
+  samples: number | null;
+  epochs: number | null;
+  loss: number | null;
+  gradNorm: number | null;
+  learningRate: number | null;
+  updateSeconds: number | null;
+  dataSeconds: number | null;
+}
 interface TrainingJob {
   id: string;
   name: string;
@@ -315,6 +325,11 @@ interface TrainingJob {
   device: "cuda" | "cpu";
   batchSize: number;
   steps: number;
+  logFreq?: number;
+  saveFreq?: number;
+  numWorkers?: number;
+  seed?: number;
+  attempts?: number;
   state: TrainingState;
   createdAt: string;
   startedAt: string | null;
@@ -358,22 +373,125 @@ function updateTrainingJob(id: string, update: (job: TrainingJob) => void): Trai
   return job;
 }
 
+function parseCompactNumber(value: string | undefined): number | null {
+  if (!value) return null;
+  const match = value.match(/^([\d.]+)([KMB])?$/i);
+  if (!match) return null;
+  const scale = ({ K: 1e3, M: 1e6, B: 1e9 } as Record<string, number>)[(match[2] || "").toUpperCase()] || 1;
+  const parsed = Number(match[1]) * scale;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseMetricValue(line: string, key: string): number | null {
+  const match = line.match(new RegExp(`${key}:([+-]?[\\d.]+(?:e[+-]?\\d+)?)`, "i"));
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function trainingMetrics(job: TrainingJob): TrainingMetric[] {
+  const metrics: TrainingMetric[] = [];
+  for (const line of job.logs) {
+    const stepMatch = line.match(/step:([\d.]+[KMB]?)/i);
+    if (!stepMatch) continue;
+    const step = parseCompactNumber(stepMatch[1]);
+    if (step === null) continue;
+    const samplesMatch = line.match(/smpl:([\d.]+[KMB]?)/i);
+    metrics.push({
+      step,
+      samples: parseCompactNumber(samplesMatch?.[1]),
+      epochs: parseMetricValue(line, "epch"),
+      loss: parseMetricValue(line, "loss"),
+      gradNorm: parseMetricValue(line, "grdn"),
+      learningRate: parseMetricValue(line, "lr"),
+      updateSeconds: parseMetricValue(line, "updt_s"),
+      dataSeconds: parseMetricValue(line, "data_s"),
+    });
+  }
+  return metrics;
+}
+
+function jobOutputPath(job: TrainingJob): string | null {
+  const outputs = path.resolve(TRAINING_ROOT, "outputs");
+  const output = path.resolve(job.outputDir);
+  return output.startsWith(outputs + path.sep) ? output : null;
+}
+
+function trainingCheckpoints(job: TrainingJob): Array<{ step: number; name: string; path: string; configPath: string; modifiedAt: string }> {
+  const output = jobOutputPath(job);
+  if (!output) return [];
+  const directory = path.join(output, "checkpoints");
+  try {
+    return fs.readdirSync(directory, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
+      .map((entry) => {
+        const checkpointPath = path.join(directory, entry.name);
+        const configPath = path.join(checkpointPath, "pretrained_model", "train_config.json");
+        if (!fs.existsSync(configPath)) return null;
+        return { step: Number(entry.name), name: entry.name, path: checkpointPath, configPath, modifiedAt: fs.statSync(checkpointPath).mtime.toISOString() };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null)
+      .sort((a, b) => b.step - a.step);
+  } catch {
+    return [];
+  }
+}
+
+function enrichTrainingJob(job: TrainingJob): TrainingJob & { metrics: TrainingMetric[]; progress: number; checkpoints: ReturnType<typeof trainingCheckpoints> } {
+  const metrics = trainingMetrics(job);
+  const checkpoints = trainingCheckpoints(job);
+  const latestStep = metrics[metrics.length - 1]?.step || checkpoints[0]?.step || 0;
+  return { ...job, metrics, progress: Math.min(100, Math.round(latestStep / Math.max(1, job.steps) * 1000) / 10), checkpoints };
+}
+
+function readNumberFile(file: string): number | null {
+  try { const value = Number(fs.readFileSync(file, "utf-8").trim()); return Number.isFinite(value) ? value : null; }
+  catch { return null; }
+}
+
+function resourceSample(): Record<string, unknown> {
+  const disk = fs.statfsSync(DATASET_ROOT);
+  const gpuLoadRaw = readNumberFile("/sys/devices/platform/bus@0/17000000.gpu/load") ?? readNumberFile("/sys/devices/gpu.0/load");
+  const thermalRoot = "/sys/class/thermal";
+  let temperatureC: number | null = null;
+  try {
+    for (const entry of fs.readdirSync(thermalRoot).filter((name) => name.startsWith("thermal_zone"))) {
+      const type = fs.readFileSync(path.join(thermalRoot, entry, "type"), "utf-8").trim().toLowerCase();
+      if (type.includes("gpu") || type.includes("cpu")) {
+        const raw = readNumberFile(path.join(thermalRoot, entry, "temp"));
+        if (raw !== null) temperatureC = Math.max(temperatureC || 0, raw > 1000 ? raw / 1000 : raw);
+      }
+    }
+  } catch { /* thermal data unavailable */ }
+  return {
+    sampledAt: new Date().toISOString(),
+    cpuLoadPercent: Math.min(100, Math.round(os.loadavg()[0] / Math.max(1, os.cpus().length) * 1000) / 10),
+    memoryUsedGb: +((os.totalmem() - os.freemem()) / 1024 ** 3).toFixed(1),
+    memoryPercent: Math.round((os.totalmem() - os.freemem()) / os.totalmem() * 1000) / 10,
+    diskFreeGb: +(disk.bavail * disk.bsize / 1024 ** 3).toFixed(1),
+    gpuLoadPercent: gpuLoadRaw === null ? null : Math.round((gpuLoadRaw > 100 ? gpuLoadRaw / 10 : gpuLoadRaw) * 10) / 10,
+    temperatureC,
+  };
+}
+
 function startTrainingJob(job: TrainingJob): void {
   if (trainingProcesses.size > 0) throw new Error("已有训练任务正在运行");
   fs.mkdirSync(path.dirname(job.outputDir), { recursive: true });
   job.state = "running";
   job.startedAt = new Date().toISOString();
+  job.finishedAt = null;
   job.error = null;
+  job.attempts = (job.attempts || 0) + 1;
   writeTrainingJobs(readTrainingJobs().map((item) => item.id === job.id ? job : item));
   const child = spawn(PYTHON_PATH, job.command, { cwd: path.join(__dirname, "../.."), env: { ...process.env, PYTHONUNBUFFERED: "1" } });
   trainingProcesses.set(job.id, child);
   let logBuffer = "";
   const consume = (chunk: Buffer) => {
-    logBuffer += chunk.toString("utf-8");
+    logBuffer += chunk.toString("utf-8").replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/\r/g, "\n");
     const lines = logBuffer.split(/\r?\n/);
     logBuffer = lines.pop() || "";
     if (!lines.length) return;
-    updateTrainingJob(job.id, (current) => { current.logs.push(...lines.filter(Boolean)); current.logs = current.logs.slice(-500); });
+    updateTrainingJob(job.id, (current) => { current.logs.push(...lines.map((line) => line.trimEnd()).filter((line) => line && !line.includes("%|") && !line.includes("it/s]"))); current.logs = current.logs.slice(-500); });
   };
   child.stdout?.on("data", consume);
   child.stderr?.on("data", consume);
@@ -387,8 +505,9 @@ function startTrainingJob(job: TrainingJob): void {
       if (logBuffer.trim()) current.logs.push(logBuffer.trim());
       current.exitCode = code;
       current.finishedAt = new Date().toISOString();
-      current.state = code === 0 ? "completed" : "failed";
-      if (code !== 0 && !current.error) current.error = signal ? `训练进程被 ${signal} 终止` : `训练进程退出码 ${code}`;
+      const wasStopping = current.state === "stopping";
+      current.state = code === 0 ? "completed" : wasStopping ? "cancelled" : "failed";
+      if (code !== 0 && !wasStopping && !current.error) current.error = signal ? `训练进程被 ${signal} 终止` : `训练进程退出码 ${code}`;
     });
   });
 }
@@ -676,6 +795,11 @@ app.get("/api/training/host", async (req, res) => {
   catch (error) { res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
 });
 
+app.get("/api/training/resources", (req, res) => {
+  try { res.json({ ok: true, ...resourceSample() }); }
+  catch (error) { res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+});
+
 app.get("/api/training/jobs", (req, res) => {
   const jobs = readTrainingJobs();
   let changed = false;
@@ -685,7 +809,7 @@ app.get("/api/training/jobs", (req, res) => {
     }
   }
   if (changed) writeTrainingJobs(jobs);
-  res.json({ ok: true, jobs });
+  res.json({ ok: true, jobs: jobs.map(enrichTrainingJob) });
 });
 
 app.post("/api/training/jobs", (req, res) => {
@@ -696,8 +820,12 @@ app.post("/api/training/jobs", (req, res) => {
   const device = req.body.device === "cpu" ? "cpu" : "cuda";
   const batchSize = Number(req.body.batchSize);
   const steps = Number(req.body.steps);
+  const logFreq = Number(req.body.logFreq ?? 200);
+  const saveFreq = Number(req.body.saveFreq ?? Math.min(20000, steps));
+  const numWorkers = Number(req.body.numWorkers ?? 4);
+  const seed = Number(req.body.seed ?? 1000);
   const name = cleanShortText(req.body.name, 80);
-  if (!dataset || !collectionId || !policy || !name || !Number.isInteger(batchSize) || batchSize < 1 || batchSize > 1024 || !Number.isInteger(steps) || steps < 1 || steps > 10_000_000) {
+  if (!dataset || !collectionId || !policy || !name || !Number.isInteger(batchSize) || batchSize < 1 || batchSize > 1024 || !Number.isInteger(steps) || steps < 1 || steps > 10_000_000 || !Number.isInteger(logFreq) || logFreq < 1 || logFreq > steps || !Number.isInteger(saveFreq) || saveFreq < 1 || saveFreq > steps || !Number.isInteger(numWorkers) || numWorkers < 0 || numWorkers > 64 || !Number.isInteger(seed) || seed < 0) {
     res.status(400).json({ ok: false, error: "训练任务参数无效" }); return;
   }
   try {
@@ -720,9 +848,13 @@ app.post("/api/training/jobs", (req, res) => {
       "--wandb.enable=false",
       `--batch_size=${batchSize}`,
       `--steps=${steps}`,
+      `--log_freq=${logFreq}`,
+      `--save_freq=${saveFreq}`,
+      `--num_workers=${numWorkers}`,
+      `--seed=${seed}`,
     ];
     const job: TrainingJob = {
-      id, name, dataset, collection: collectionId, episodes, policy, device, batchSize, steps,
+      id, name, dataset, collection: collectionId, episodes, policy, device, batchSize, steps, logFreq, saveFreq, numWorkers, seed, attempts: 0,
       state: "draft", createdAt: new Date().toISOString(), startedAt: null, finishedAt: null,
       outputDir, command, exitCode: null, error: null, logs: [],
     };
@@ -749,6 +881,22 @@ app.post("/api/training/jobs/:job/stop", (req, res) => {
   const job = updateTrainingJob(req.params.job, (current) => { current.state = "stopping"; });
   child.kill("SIGTERM");
   res.json({ ok: true, job });
+});
+
+app.post("/api/training/jobs/:job/resume", (req, res) => {
+  const jobs = readTrainingJobs();
+  const job = jobs.find((item) => item.id === req.params.job);
+  if (!job) { res.status(404).json({ ok: false, error: "找不到训练任务" }); return; }
+  if (!["failed", "cancelled"].includes(job.state)) { res.status(409).json({ ok: false, error: "只有失败或已停止的任务可以续训" }); return; }
+  const checkpoint = trainingCheckpoints(job)[0];
+  if (!checkpoint) { res.status(409).json({ ok: false, error: "没有可用 Checkpoint，无法续训" }); return; }
+  try {
+    job.command = ["-m", "lerobot.scripts.lerobot_train", `--config_path=${checkpoint.configPath}`, "--resume=true"];
+    startTrainingJob(job);
+    res.json({ ok: true, job: enrichTrainingJob(job) });
+  } catch (error) {
+    res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
 });
 
 app.post("/api/recording/start", (req, res) => {
