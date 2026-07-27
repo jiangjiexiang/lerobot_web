@@ -104,7 +104,7 @@
           </section>
           <section class="model-panel">
             <div><strong>模型登记</strong><span>{{ currentModels.length }} 个版本</span></div>
-            <ul v-if="currentModels.length"><li v-for="model in currentModels" :key="model.id"><span><strong>{{ model.name }} v{{ model.version }}</strong><small>Step {{ model.step.toLocaleString() }} · {{ formatBytes(model.sizeBytes) }}</small></span><code :title="model.sha256">{{ model.sha256.slice(0, 12) }}…</code><em :class="model.stage">{{ modelStage(model.stage) }}</em><button v-if="model.stage !== 'production'" @click="updateModelStage(model.id, 'production')">设为生产</button><button v-else @click="updateModelStage(model.id, 'candidate')">撤回</button></li></ul>
+            <ul v-if="currentModels.length"><li v-for="model in currentModels" :key="model.id"><span><strong>{{ model.name }} v{{ model.version }}</strong><small>Step {{ model.step.toLocaleString() }} · {{ formatBytes(model.sizeBytes) }}{{ model.evaluation?.successRate == null ? "" : ` · 评估 ${formatPercent(model.evaluation.successRate)} (${model.evaluation.success}/${model.evaluation.success + model.evaluation.failure})` }}</small></span><code :title="model.sha256">{{ model.sha256.slice(0, 12) }}…</code><em :class="model.stage">{{ modelStage(model.stage) }}</em><button v-if="model.stage !== 'production'" @click="updateModelStage(model.id, 'production')">设为生产</button><button v-else @click="updateModelStage(model.id, 'candidate')">撤回</button></li></ul>
             <p v-else>从 Checkpoint 登记模型后，可用于后续评估和部署</p>
           </section>
           <div class="command"><div><strong>执行命令</strong><button title="复制命令" @click="copyCommand">复制</button></div><code>{{ commandText }}</code></div>
@@ -131,7 +131,7 @@ interface Checkpoint { step: number; name: string; path: string; configPath: str
 interface PreflightCheck { id: string; label: string; status: "pass" | "warning" | "fail"; detail: string }
 interface Preflight { ready: boolean; checks: PreflightCheck[]; checkedAt: string }
 type ModelStage = "candidate" | "production" | "archived";
-interface RegisteredModel { id: string; name: string; version: number; jobId: string; checkpoint: string; step: number; policy: string; dataset: string; collection: string; modelPath: string; sizeBytes: number; sha256: string; stage: ModelStage; notes: string; createdAt: string; updatedAt: string }
+interface RegisteredModel { id: string; name: string; version: number; jobId: string; checkpoint: string; step: number; policy: string; dataset: string; collection: string; modelPath: string; sizeBytes: number; sha256: string; stage: ModelStage; notes: string; createdAt: string; updatedAt: string; evaluation?: { jobs: number; episodes: number; success: number; failure: number; successRate: number | null } }
 type JobState = "draft" | "running" | "stopping" | "completed" | "failed" | "cancelled";
 interface TrainingJob { id: string; name: string; dataset: string; collection: string; episodes: number[]; policy: string; device: string; batchSize: number; steps: number; logFreq?: number; saveFreq?: number; numWorkers?: number; seed?: number; state: JobState; createdAt: string; startedAt?: string | null; finishedAt?: string | null; outputDir: string; command: string[]; error: string | null; logs: string[]; metrics: TrainingMetric[]; checkpoints: Checkpoint[]; progress: number; archivedAt?: string | null; bestAt?: string | null }
 
@@ -225,6 +225,7 @@ function jobState(state: JobState) { return ({ draft: "待启动", running: "训
 function formatDate(value: string) { return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
 function formatMetric(value: number | null | undefined) { if (value == null) return "-"; return Math.abs(value) < .001 && value !== 0 ? value.toExponential(2) : value.toFixed(3); }
 function formatBytes(value: number) { if (!value) return "0 B"; const units = ["B", "KB", "MB", "GB"]; const index = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024))); return `${(value / 1024 ** index).toFixed(index > 1 ? 1 : 0)} ${units[index]}`; }
+function formatPercent(value: number) { return `${(value * 100).toFixed(1)}%`; }
 function modelStage(stage: ModelStage) { return ({ candidate: "候选", production: "生产", archived: "归档" })[stage]; }
 
 watch(selectedJobId, () => { preflight.value = null; Object.keys(checkpointHashes).forEach((key) => delete checkpointHashes[key]); });

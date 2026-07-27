@@ -394,6 +394,22 @@ interface EvaluationJob {
   logs: string[];
 }
 
+type EvaluationOutcomeStatus = "unreviewed" | "success" | "failure" | "invalid";
+interface EvaluationOutcome {
+  status: EvaluationOutcomeStatus;
+  failureReason: string;
+  notes: string;
+  reviewer: string;
+  createdAt: string;
+  updatedAt: string;
+}
+interface EvaluationResults {
+  schemaVersion: 1;
+  jobId: string;
+  modelId: string;
+  episodes: Record<string, EvaluationOutcome>;
+}
+
 interface PreflightCheck {
   id: string;
   label: string;
@@ -438,6 +454,55 @@ function updateEvaluationJob(id: string, update: (job: EvaluationJob) => void): 
   const job = jobs.find((item) => item.id === id);
   if (!job) return null;
   update(job); writeEvaluationJobs(jobs); return job;
+}
+
+function evaluationResultsFile(job: EvaluationJob): string {
+  return path.join(job.outputDatasetPath, ".lerobot-web", "evaluation.json");
+}
+
+function readEvaluationResults(job: EvaluationJob): EvaluationResults {
+  try {
+    const value = JSON.parse(fs.readFileSync(evaluationResultsFile(job), "utf-8"));
+    return value && value.jobId === job.id && typeof value.episodes === "object"
+      ? value as EvaluationResults
+      : { schemaVersion: 1, jobId: job.id, modelId: job.modelId, episodes: {} };
+  } catch {
+    return { schemaVersion: 1, jobId: job.id, modelId: job.modelId, episodes: {} };
+  }
+}
+
+function writeEvaluationResults(job: EvaluationJob, results: EvaluationResults): void {
+  const directory = path.dirname(evaluationResultsFile(job));
+  fs.mkdirSync(directory, { recursive: true });
+  const target = evaluationResultsFile(job); const temporary = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(results, null, 2) + "\n", "utf-8");
+  fs.renameSync(temporary, target);
+}
+
+function evaluationEpisodeCount(job: EvaluationJob): number {
+  try { return Number(JSON.parse(fs.readFileSync(path.join(job.outputDatasetPath, "meta", "info.json"), "utf-8")).total_episodes || 0); }
+  catch { return 0; }
+}
+
+function wilsonInterval(success: number, failure: number): { confidenceLow: number | null; confidenceHigh: number | null } {
+  const evaluated = success + failure;
+  if (!evaluated) return { confidenceLow: null, confidenceHigh: null };
+  const rate = success / evaluated; const z = 1.96; const denominator = 1 + z * z / evaluated;
+  const center = (rate + z * z / (2 * evaluated)) / denominator;
+  const margin = z * Math.sqrt(rate * (1 - rate) / evaluated + z * z / (4 * evaluated * evaluated)) / denominator;
+  return { confidenceLow: Math.max(0, center - margin), confidenceHigh: Math.min(1, center + margin) };
+}
+
+function summarizeEvaluation(job: EvaluationJob): Record<string, number | null> {
+  const total = evaluationEpisodeCount(job); const results = readEvaluationResults(job);
+  let success = 0; let failure = 0; let invalid = 0;
+  for (let episode = 0; episode < total; episode += 1) {
+    const status = results.episodes[String(episode)]?.status || "unreviewed";
+    if (status === "success") success += 1; else if (status === "failure") failure += 1; else if (status === "invalid") invalid += 1;
+  }
+  const evaluated = success + failure; const successRate = evaluated ? success / evaluated : null;
+  const { confidenceLow, confidenceHigh } = wilsonInterval(success, failure);
+  return { total, reviewed: success + failure + invalid, success, failure, invalid, pending: total - success - failure - invalid, evaluated, successRate, confidenceLow, confidenceHigh };
 }
 
 function readRegisteredModels(): RegisteredModel[] {
@@ -1103,7 +1168,15 @@ app.get("/api/training/jobs", (req, res) => {
 });
 
 app.get("/api/training/models", (req, res) => {
-  res.json({ ok: true, models: readRegisteredModels() });
+  const evaluations = readEvaluationJobs();
+  const models = readRegisteredModels().map((model) => {
+    const summaries = evaluations.filter((job) => job.modelId === model.id).map(summarizeEvaluation).filter((summary) => Number(summary.total || 0) > 0);
+    const success = summaries.reduce((sum, item) => sum + Number(item.success || 0), 0);
+    const failure = summaries.reduce((sum, item) => sum + Number(item.failure || 0), 0);
+    const evaluated = success + failure;
+    return { ...model, evaluation: { jobs: summaries.length, episodes: summaries.reduce((sum, item) => sum + Number(item.total || 0), 0), success, failure, successRate: evaluated ? success / evaluated : null, ...wilsonInterval(success, failure) } };
+  });
+  res.json({ ok: true, models });
 });
 
 app.get("/api/training/evaluations", (req, res) => {
@@ -1112,10 +1185,14 @@ app.get("/api/training/evaluations", (req, res) => {
   for (const job of jobs) {
     if ((job.state === "running" || job.state === "stopping") && !evaluationProcesses.has(job.id)) {
       job.state = "failed"; job.finishedAt = new Date().toISOString(); job.error = "服务重启，评估进程状态已丢失"; changed = true;
+    } else if (job.state === "draft" && evaluationEpisodeCount(job) >= job.numEpisodes) {
+      job.state = "completed"; job.attempts = Math.max(1, job.attempts); job.startedAt ||= job.createdAt;
+      try { job.finishedAt = fs.statSync(path.join(job.outputDatasetPath, "meta", "info.json")).mtime.toISOString(); } catch { job.finishedAt = new Date().toISOString(); }
+      job.error = null; changed = true;
     }
   }
   if (changed) writeEvaluationJobs(jobs);
-  res.json({ ok: true, jobs });
+  res.json({ ok: true, jobs: jobs.map((job) => ({ ...job, summary: summarizeEvaluation(job) })) });
 });
 
 app.post("/api/training/evaluations", (req, res) => {
@@ -1185,6 +1262,44 @@ app.delete("/api/training/evaluations/:job", (req, res) => {
   if (job.state !== "draft" || job.attempts > 0 || fs.existsSync(job.outputDatasetPath)) { res.status(409).json({ ok: false, error: "只能删除从未启动且没有输出数据的草稿" }); return; }
   writeEvaluationJobs(jobs.filter((item) => item.id !== job.id));
   res.json({ ok: true, deleted: job.id });
+});
+
+app.get("/api/training/evaluations/:job/results", async (req, res) => {
+  const job = readEvaluationJobs().find((item) => item.id === req.params.job);
+  if (!job) { res.status(404).json({ ok: false, error: "找不到评估任务" }); return; }
+  if (!fs.existsSync(path.join(job.outputDatasetPath, "meta", "info.json"))) { res.json({ ok: true, available: false, summary: summarizeEvaluation(job), episodes: [] }); return; }
+  try {
+    const detail = await runDatasetCatalog("detail", job.evalDataset);
+    const results = readEvaluationResults(job); const reviews = readReviews(job.outputDatasetPath);
+    const episodes = Array.isArray(detail.episodes) ? detail.episodes.map((episode) => {
+      const item = episode as Record<string, unknown>; const index = Number(item.episode);
+      const videos = item.videos && typeof item.videos === "object" ? Object.fromEntries(
+        Object.entries(item.videos as Record<string, string>).map(([key, relative]) => [key, `/api/datasets/${encodeURIComponent(job.evalDataset)}/video?file=${Buffer.from(relative).toString("base64url")}`]),
+      ) : {};
+      return { ...item, videos, dataReview: reviews.episodes[String(index)] || { status: "unreviewed" }, outcome: results.episodes[String(index)] || { status: "unreviewed", failureReason: "", notes: "", reviewer: "" } };
+    }) : [];
+    res.json({ ok: true, available: true, summary: summarizeEvaluation(job), episodes });
+  } catch (error) { res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.patch("/api/training/evaluations/:job/results/:episode", (req, res) => {
+  const job = readEvaluationJobs().find((item) => item.id === req.params.job); const episode = Number(req.params.episode);
+  if (!job || !Number.isInteger(episode) || episode < 0) { res.status(404).json({ ok: false, error: "找不到评估任务或 Episode" }); return; }
+  const statuses: EvaluationOutcomeStatus[] = ["unreviewed", "success", "failure", "invalid"];
+  const status = typeof req.body?.status === "string" && statuses.includes(req.body.status) ? req.body.status as EvaluationOutcomeStatus : null;
+  const failureReasons = ["", "object_missed", "grasp_failed", "placement_failed", "collision", "timeout", "unstable", "camera_occlusion", "action_offset", "other"];
+  const failureReason = typeof req.body?.failureReason === "string" && failureReasons.includes(req.body.failureReason) ? req.body.failureReason : null;
+  if (!status || failureReason === null || (status === "failure" && !failureReason)) { res.status(400).json({ ok: false, error: "评估结果无效；失败结果必须选择失败原因" }); return; }
+  try {
+    ensureEpisodeExists(job.outputDatasetPath, episode);
+    const results = readEvaluationResults(job); const previous = results.episodes[String(episode)]; const now = new Date().toISOString();
+    const outcome: EvaluationOutcome = { status, failureReason: status === "failure" || status === "invalid" ? failureReason : "", notes: cleanShortText(req.body?.notes, 2000), reviewer: cleanShortText(req.body?.reviewer, 80), createdAt: previous?.createdAt || now, updatedAt: now };
+    results.episodes[String(episode)] = outcome; writeEvaluationResults(job, results);
+    appendAudit(job.outputDatasetPath, { action: "evaluation.outcome", actor: outcome.reviewer || "本地用户", dataset: job.evalDataset, episodes: [episode], evaluationJob: job.id, model: job.modelId, outcome: status, failureReason: outcome.failureReason });
+    res.json({ ok: true, outcome, summary: summarizeEvaluation(job) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error); res.status(message.startsWith("找不到") ? 404 : 400).json({ ok: false, error: message });
+  }
 });
 
 app.post("/api/training/jobs", (req, res) => {
