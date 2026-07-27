@@ -1752,6 +1752,26 @@ app.get("/api/training/jobs/:job/preflight", async (req, res) => {
   catch (error) { res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
 });
 
+app.get("/api/training/jobs/:job/cloud-spec", (req, res) => {
+  const job = readTrainingJobs().find((item) => item.id === req.params.job);
+  if (!job) { res.status(404).json({ ok: false, error: "找不到训练任务" }); return; }
+  const remoteRoot = `/data/lerobot/${job.dataset}`;
+  const remoteOutput = `outputs/${job.id}`;
+  const remoteCommand = job.command.map((argument) => argument.replace(`--dataset.root=${datasetPath(job.dataset)}`, `--dataset.root=${remoteRoot}`).replace(`--output_dir=${job.outputDir}`, `--output_dir=${remoteOutput}`));
+  const spec = {
+    schemaVersion: 1,
+    provider: "generic-ssh",
+    generatedAt: new Date().toISOString(),
+    job: { id: job.id, name: job.name, policy: job.policy, device: job.device, batchSize: job.batchSize, steps: job.steps, numWorkers: job.numWorkers ?? 4, seed: job.seed ?? 1000 },
+    dataset: { name: job.dataset, collection: job.collection, episodes: job.episodes, localRoot: datasetPath(job.dataset), remoteRoot, manifestUrl: `/api/datasets/${encodeURIComponent(job.dataset)}/collections/${encodeURIComponent(job.collection)}/snapshot` },
+    resourceEstimate: estimateTrainingResources(job),
+    sync: { exclude: [".lerobot-web"], command: ["rsync", "-a", "--exclude=.lerobot-web", `${datasetPath(job.dataset)}/`, `user@cloud-host:${remoteRoot}/`] },
+    remote: { workingDirectory: remoteOutput, trainCommand: ["python3", ...remoteCommand], installHint: "在云主机安装与本地一致的 lerobot 版本及策略依赖；默认不上传 Hugging Face/WandB。" },
+    notes: ["这是可审计的命令方案，不会连接云主机或上传数据。", "上传前请在云端校验 snapshot manifest fingerprint。"],
+  };
+  res.json({ ok: true, spec });
+});
+
 app.post("/api/training/jobs/:job/clone", (req, res) => {
   const source = readTrainingJobs().find((item) => item.id === req.params.job);
   if (!source) { res.status(404).json({ ok: false, error: "找不到训练任务" }); return; }

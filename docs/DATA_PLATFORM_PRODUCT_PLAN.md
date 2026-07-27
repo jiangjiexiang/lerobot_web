@@ -121,6 +121,7 @@
 - 主机检测展示 CPU、内存、磁盘、CUDA、GPU 型号和显存，并给出分辨率与 batch size 建议。
 - 训练启动前按策略、Batch size 和 DataLoader workers 估算 GPU/系统内存需求，与实机容量比较后给出通过、警告或阻断原因；估算标注为保守参考，运行中指标仍以实时监控为准。
 - `/api/training/resources/estimate` 提供无副作用的创建前估算，便于前端表单和后续队列调度复用同一套资源门禁。
+- 训练任务可导出 Generic SSH 云端训练 spec，包含 snapshot manifest 地址、rsync 排除规则、远端数据/输出路径、完整训练命令和资源估算；导出只生成方案，不连接云主机或上传数据。
 - SmolVLA 在 8GB 显存设备上建议 batch size 不超过 28；Pi0 提示额外安装 `lerobot[pi]`。
 - 任务状态包括待启动、训练中、停止中、已完成和失败；保存命令、日志、退出码、输出目录和 Checkpoint。
 - 中断续训使用 `checkpoints/last/pretrained_model/train_config.json` 与 `--resume=true`。
