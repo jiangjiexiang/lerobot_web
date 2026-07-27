@@ -800,6 +800,14 @@ function analyzeJpegFrame(frame: Buffer): Promise<{ mean: number; blackRatio: nu
   });
 }
 
+function estimateTrainingResources(job: TrainingJob): { gpuMemoryGb: number; systemMemoryGb: number; basis: string } {
+  const baseGpu: Record<string, number> = { act: 1.8, diffusion: 3.2, tdmpc: 2.4, vqbet: 3, smolvla: 4.5, pi0: 8, "pi0-fast": 6.5, sac: 1.8, reward_classifier: 1.8 };
+  const perBatch: Record<string, number> = { act: .12, diffusion: .16, tdmpc: .14, vqbet: .16, smolvla: .2, pi0: .3, "pi0-fast": .25, sac: .1, reward_classifier: .1 };
+  const gpuMemoryGb = job.device === "cuda" ? +(baseGpu[job.policy] + perBatch[job.policy] * job.batchSize).toFixed(1) : 0;
+  const systemMemoryGb = +(2 + job.batchSize * .06 + (job.numWorkers || 0) * .2).toFixed(1);
+  return { gpuMemoryGb, systemMemoryGb, basis: "保守估算：策略基础占用 + batch/workers 增量，实际以启动后监控为准" };
+}
+
 async function trainingPreflight(job: TrainingJob): Promise<{ ready: boolean; checks: PreflightCheck[]; checkedAt: string }> {
   const checks: PreflightCheck[] = [];
   const datasetRoot = datasetPath(job.dataset);
@@ -835,8 +843,13 @@ async function trainingPreflight(job: TrainingJob): Promise<{ ready: boolean; ch
 
   const resources = resourceSample() as { diskFreeGb: number; memoryUsedGb: number };
   const memoryFreeGb = (os.totalmem() - os.freemem()) / 1024 ** 3;
+  const estimate = estimateTrainingResources(job);
   checks.push({ id: "disk", label: "磁盘空间", status: resources.diskFreeGb >= 5 ? "pass" : resources.diskFreeGb >= 2 ? "warning" : "fail", detail: `可用 ${resources.diskFreeGb} GB，建议至少保留 5 GB` });
-  checks.push({ id: "memory", label: "可用内存", status: memoryFreeGb >= 2 ? "pass" : memoryFreeGb >= 1 ? "warning" : "fail", detail: `可用 ${memoryFreeGb.toFixed(1)} GB` });
+  checks.push({ id: "memory", label: "可用内存", status: memoryFreeGb >= estimate.systemMemoryGb ? "pass" : memoryFreeGb >= estimate.systemMemoryGb * .75 ? "warning" : "fail", detail: `可用 ${memoryFreeGb.toFixed(1)} GB · 预计需要 ${estimate.systemMemoryGb} GB` });
+  const profile = await hostProfile(); const gpu = profile.gpu as { available?: boolean; memoryGb?: number | null };
+  const gpuCapacity = Number(gpu.memoryGb || 0);
+  const gpuStatus = job.device === "cpu" ? "pass" : !gpu.available ? "fail" : estimate.gpuMemoryGb > gpuCapacity ? "fail" : estimate.gpuMemoryGb > gpuCapacity * .85 ? "warning" : "pass";
+  checks.push({ id: "resource_estimate", label: "训练资源估算", status: gpuStatus, detail: job.device === "cpu" ? `${estimate.systemMemoryGb} GB 系统内存需求 · ${estimate.basis}` : `预计显存 ${estimate.gpuMemoryGb} GB / 实机 ${gpuCapacity || "未检测到"} GB · ${estimate.basis}` });
   checks.push({ id: "exclusive", label: "设备占用", status: evaluationProcesses.size === 0 ? "pass" : "fail", detail: evaluationProcesses.size === 0 ? "没有评估任务占用设备" : "评估任务正在运行" });
   return { ready: !checks.some((check) => check.status === "fail"), checks, checkedAt: new Date().toISOString() };
 }
@@ -1402,6 +1415,20 @@ app.get("/api/training/host", async (req, res) => {
 app.get("/api/training/resources", (req, res) => {
   try { res.json({ ok: true, ...resourceSample() }); }
   catch (error) { res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/training/resources/estimate", async (req, res) => {
+  const policies = ["act", "diffusion", "tdmpc", "vqbet", "smolvla", "pi0", "pi0-fast", "sac", "reward_classifier"];
+  const policy = typeof req.body?.policy === "string" && policies.includes(req.body.policy) ? req.body.policy : null;
+  const device = req.body?.device === "cpu" ? "cpu" : req.body?.device === "cuda" ? "cuda" : null;
+  const batchSize = Number(req.body?.batchSize); const numWorkers = Number(req.body?.numWorkers ?? 4);
+  if (!policy || !device || !Number.isInteger(batchSize) || batchSize < 1 || batchSize > 1024 || !Number.isInteger(numWorkers) || numWorkers < 0 || numWorkers > 64) {
+    res.status(400).json({ ok: false, error: "资源估算参数无效" }); return;
+  }
+  const job = { policy, device, batchSize, numWorkers } as TrainingJob;
+  const estimate = estimateTrainingResources(job); const profile = await hostProfile(); const gpu = profile.gpu as { available?: boolean; memoryGb?: number | null }; const capacity = Number(gpu.memoryGb || 0);
+  const ready = device === "cpu" ? Number(profile.memory && (profile.memory as Record<string, unknown>).freeGb || 0) >= estimate.systemMemoryGb * .75 : Boolean(gpu.available) && estimate.gpuMemoryGb <= capacity;
+  res.json({ ok: true, ready, estimate, host: { gpuAvailable: Boolean(gpu.available), gpuMemoryGb: capacity || null, memoryFreeGb: (profile.memory as Record<string, unknown>).freeGb || null } });
 });
 
 app.get("/api/training/jobs", (req, res) => {
