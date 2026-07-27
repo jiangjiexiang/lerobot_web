@@ -387,6 +387,7 @@ interface DeploymentTarget {
   currentRevisionId: string | null;
   updatedAt: string | null;
   revisions: DeploymentRevision[];
+  runtime: DeploymentRuntime;
 }
 interface InferenceIncident {
   id: string;
@@ -401,6 +402,20 @@ interface InferenceIncident {
   reportedBy: string;
   resolvedAt: string | null;
   resolution: string;
+}
+interface DeploymentRuntime {
+  status: "offline" | "healthy" | "degraded";
+  lastHeartbeat: string | null;
+  startedAt: string | null;
+  inferenceCount: number;
+  successCount: number;
+  errorCount: number;
+  avgLatencyMs: number | null;
+  p95LatencyMs: number | null;
+  recentLatencies: number[];
+  lastError: string;
+  processId: string;
+  updatedAt: string | null;
 }
 interface ReleaseGateConfig {
   minEvaluatedEpisodes: number;
@@ -485,6 +500,14 @@ interface PreflightCheck {
 
 const trainingProcesses = new Map<string, ChildProcess>();
 const evaluationProcesses = new Map<string, ChildProcess>();
+const deploymentRuntimeQueues = new Map<string, Promise<void>>();
+
+function enqueueDeploymentRuntime<T>(targetId: string, operation: () => T | Promise<T>): Promise<T> {
+  const previous = deploymentRuntimeQueues.get(targetId) || Promise.resolve();
+  const result = previous.then(operation, operation);
+  deploymentRuntimeQueues.set(targetId, result.then(() => undefined, () => undefined));
+  return result;
+}
 
 function trainingJobsFile(): string {
   return path.join(TRAINING_ROOT, "jobs.json");
@@ -506,14 +529,18 @@ function defaultReleaseGate(): ReleaseGateConfig {
   return { minEvaluatedEpisodes: 10, minSuccessRate: 0.8, minConfidenceLow: 0.5, blockOpenSeverity: "error", updatedAt: null, updatedBy: "系统默认" };
 }
 
+function defaultDeploymentRuntime(): DeploymentRuntime {
+  return { status: "offline", lastHeartbeat: null, startedAt: null, inferenceCount: 0, successCount: 0, errorCount: 0, avgLatencyMs: null, p95LatencyMs: null, recentLatencies: [], lastError: "", processId: "", updatedAt: null };
+}
+
 function readDeploymentStore(): DeploymentStore {
   try {
     const value = JSON.parse(fs.readFileSync(deploymentsFile(), "utf-8"));
     if (Array.isArray(value.targets) && Array.isArray(value.incidents)) {
-      return { schemaVersion: 2, targets: value.targets, incidents: value.incidents, releaseGate: { ...defaultReleaseGate(), ...(value.releaseGate || {}) } };
+      return { schemaVersion: 2, targets: value.targets.map((target: DeploymentTarget) => ({ ...target, runtime: { ...defaultDeploymentRuntime(), ...(target.runtime || {}) } })), incidents: value.incidents, releaseGate: { ...defaultReleaseGate(), ...(value.releaseGate || {}) } };
     }
   } catch { /* initialize below */ }
-  return { schemaVersion: 2, targets: [{ id: "local-robot", name: "本机机器人", currentRevisionId: null, updatedAt: null, revisions: [] }], incidents: [], releaseGate: defaultReleaseGate() };
+  return { schemaVersion: 2, targets: [{ id: "local-robot", name: "本机机器人", currentRevisionId: null, updatedAt: null, revisions: [], runtime: defaultDeploymentRuntime() }], incidents: [], releaseGate: defaultReleaseGate() };
 }
 
 function writeDeploymentStore(store: DeploymentStore): void {
@@ -848,11 +875,16 @@ async function activateDeployment(targetId: string, model: RegisteredModel, inpu
   return revision;
 }
 
+function deploymentRuntimeView(runtime: DeploymentRuntime): DeploymentRuntime {
+  const stale = !runtime.lastHeartbeat || Date.now() - Date.parse(runtime.lastHeartbeat) > 30_000;
+  return { ...runtime, status: stale ? "offline" : runtime.status, recentLatencies: runtime.recentLatencies.slice(-100) };
+}
+
 function enrichDeploymentTarget(target: DeploymentTarget, incidents: InferenceIncident[]): DeploymentTarget & { current: DeploymentRevision | null; linkPath: string; healthy: boolean; openIncidents: number } {
   const current = target.revisions.find((item) => item.id === target.currentRevisionId) || null; const linkPath = path.join(deploymentDirectory(target.id), "current");
   let healthy = false;
   if (current) { try { healthy = fs.realpathSync(linkPath) === fs.realpathSync(current.artifactPath); } catch { healthy = false; } }
-  return { ...target, current, linkPath, healthy, openIncidents: incidents.filter((item) => item.targetId === target.id && item.status === "open").length };
+  return { ...target, runtime: deploymentRuntimeView(target.runtime), current, linkPath, healthy, openIncidents: incidents.filter((item) => item.targetId === target.id && item.status === "open").length };
 }
 
 function enrichTrainingJob(job: TrainingJob): TrainingJob & { metrics: TrainingMetric[]; progress: number; checkpoints: ReturnType<typeof trainingCheckpoints> } {
@@ -1348,6 +1380,33 @@ app.get("/api/training/models", (req, res) => {
 app.get("/api/training/deployments", (req, res) => {
   const store = readDeploymentStore();
   res.json({ ok: true, targets: store.targets.map((target) => enrichDeploymentTarget(target, store.incidents)), incidents: store.incidents, releaseGate: store.releaseGate });
+});
+
+app.post("/api/training/deployments/:target/heartbeat", async (req, res) => {
+  const targetId = req.params.target;
+  const store = readDeploymentStore(); const target = store.targets.find((item) => item.id === targetId);
+  const latencyMs = req.body?.latencyMs; const success = req.body?.success; const error = cleanShortText(req.body?.error, 500);
+  if (!target || !target.currentRevisionId) { res.status(409).json({ ok: false, error: "部署目标当前没有活动修订" }); return; }
+  if (typeof latencyMs !== "number" || !Number.isFinite(latencyMs) || latencyMs < 0 || latencyMs > 600000 || typeof success !== "boolean") {
+    res.status(400).json({ ok: false, error: "心跳必须包含有效 latencyMs 和 success" }); return;
+  }
+  try {
+    const runtime = await enqueueDeploymentRuntime(targetId, () => {
+      const latestStore = readDeploymentStore(); const latestTarget = latestStore.targets.find((item) => item.id === targetId);
+      if (!latestTarget || !latestTarget.currentRevisionId) throw new Error("部署目标当前没有活动修订");
+      const next = { ...defaultDeploymentRuntime(), ...(latestTarget.runtime || {}) }; const now = new Date().toISOString();
+      next.lastHeartbeat = now; next.updatedAt = now; next.startedAt = next.startedAt || now; next.processId = cleanShortText(req.body?.processId, 120) || next.processId;
+      next.inferenceCount += 1; if (success) next.successCount += 1; else { next.errorCount += 1; if (error) next.lastError = error; }
+      next.recentLatencies = [...next.recentLatencies, latencyMs].slice(-100);
+      const sorted = [...next.recentLatencies].sort((a, b) => a - b); const p95Index = Math.max(0, Math.ceil(sorted.length * .95) - 1);
+      next.avgLatencyMs = Math.round(next.recentLatencies.reduce((sum, value) => sum + value, 0) / next.recentLatencies.length * 10) / 10;
+      next.p95LatencyMs = Math.round(sorted[p95Index] * 10) / 10;
+      const errorRate = next.inferenceCount ? next.errorCount / next.inferenceCount : 0;
+      next.status = !success || errorRate >= .1 || (next.p95LatencyMs || 0) > 1000 ? "degraded" : "healthy";
+      latestTarget.runtime = next; writeDeploymentStore(latestStore); return deploymentRuntimeView(next);
+    });
+    res.status(200).json({ ok: true, runtime });
+  } catch (error) { res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
 });
 
 app.patch("/api/training/deployment-gate", (req, res) => {
