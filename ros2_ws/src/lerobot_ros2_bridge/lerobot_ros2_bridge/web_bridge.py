@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import math
 import os
@@ -15,11 +16,12 @@ import time
 from pathlib import Path
 
 import rclpy
+import message_filters
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import CompressedImage, JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 if __package__:
@@ -51,6 +53,7 @@ class LeRobotWebRosBridge(Node):
         self._command_subscription = None
         self._leader_subscription = None
         self._follower_subscription = None
+        self._capture_sync_enabled = False
 
         sensor_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -73,6 +76,39 @@ class LeRobotWebRosBridge(Node):
         self._command_pub = self.create_publisher(
             JointTrajectory, args.command_topic, command_qos
         )
+        self._camera1_pub = self.create_publisher(
+            CompressedImage, args.camera1_topic, sensor_qos
+        )
+        self._camera2_pub = self.create_publisher(
+            CompressedImage, args.camera2_topic, sensor_qos
+        )
+        self._camera1_subscription = self.create_subscription(
+            CompressedImage, args.camera1_topic, self._on_camera1, sensor_qos
+        )
+        self._camera2_subscription = self.create_subscription(
+            CompressedImage, args.camera2_topic, self._on_camera2, sensor_qos
+        )
+        self._sync_inputs = [
+            message_filters.Subscriber(
+                self, JointState, args.leader_state_topic, qos_profile=sensor_qos
+            ),
+            message_filters.Subscriber(
+                self, JointState, args.follower_state_topic, qos_profile=sensor_qos
+            ),
+            message_filters.Subscriber(
+                self, CompressedImage, args.camera1_topic, qos_profile=sensor_qos
+            ),
+            message_filters.Subscriber(
+                self, CompressedImage, args.camera2_topic, qos_profile=sensor_qos
+            ),
+        ]
+        self._capture_synchronizer = message_filters.ApproximateTimeSynchronizer(
+            self._sync_inputs,
+            queue_size=args.capture_sync_queue,
+            slop=args.capture_sync_slop,
+            allow_headerless=False,
+        )
+        self._capture_synchronizer.registerCallback(self._on_synchronized_capture)
         if args.command_source == "ros":
             self._command_subscription = self.create_subscription(
                 JointTrajectory, args.command_topic, self._on_ros_command, command_qos
@@ -137,6 +173,16 @@ class LeRobotWebRosBridge(Node):
         message.header.stamp = self.get_clock().now().to_msg()
         message.name = list(JOINT_NAMES)
         message.position = lerobot_to_ros(joints)
+        return message
+
+    def _ros_joint_state(
+        self, joints: dict[str, float], stamp=None, frame_id: str = ""
+    ) -> JointState:
+        message = JointState()
+        message.header.stamp = stamp or self.get_clock().now().to_msg()
+        message.header.frame_id = frame_id
+        message.name = list(joints)
+        message.position = [float(joints[name]) for name in message.name]
         return message
 
     def _trajectory(self, joints: dict[str, float]) -> JointTrajectory:
@@ -217,10 +263,17 @@ class LeRobotWebRosBridge(Node):
         for line in sys.stdin:
             try:
                 message = json.loads(line)
+                if message.get("type") == "capture_sync":
+                    self._capture_sync_enabled = bool(message.get("enabled"))
+                    continue
+                if message.get("type") == "ros_camera_frame":
+                    self._publish_camera_from_stdio(message)
+                    continue
                 joints = message.get("joints") if message.get("type") == "action" else None
                 if isinstance(joints, dict) and self.args.command_source == "web":
                     self._latest_leader = joints
                     if self.args.driver == "external" and message.get("units") == "ros":
+                        self._leader_pub.publish(self._ros_joint_state(joints))
                         self._command_pub.publish(self._ros_trajectory(joints))
                     else:
                         self._leader_pub.publish(self._joint_state(joints))
@@ -242,6 +295,9 @@ class LeRobotWebRosBridge(Node):
                 self.get_logger().warning("rejected trajectory command: positions must be finite")
                 return
             self._latest_leader = desired
+            self._leader_pub.publish(
+                self._ros_joint_state(desired, message.header.stamp)
+            )
             self._emit_external_observation()
             return
         try:
@@ -306,6 +362,69 @@ class LeRobotWebRosBridge(Node):
         self._latest_follower = joints
         self._emit_external_observation()
 
+    def _publish_camera_from_stdio(self, message: dict) -> None:
+        data = message.get("data")
+        camera = message.get("camera")
+        if not isinstance(data, str) or camera not in ("camera1", "camera2"):
+            raise ValueError("camera frame requires camera1/camera2 and base64 data")
+        output = CompressedImage()
+        timestamp = float(message.get("ts", time.time()))
+        seconds = int(timestamp)
+        output.header.stamp.sec = seconds
+        output.header.stamp.nanosec = int((timestamp - seconds) * 1_000_000_000)
+        output.header.frame_id = camera
+        output.format = "jpeg"
+        output.data = base64.b64decode(data, validate=True)
+        (self._camera1_pub if camera == "camera1" else self._camera2_pub).publish(output)
+
+    @staticmethod
+    def _stamp_seconds(message) -> float:
+        return message.header.stamp.sec + message.header.stamp.nanosec / 1_000_000_000
+
+    def _emit_ros_camera(self, camera: str, message: CompressedImage) -> None:
+        emit({
+            "type": "ros_camera_frame",
+            "camera": camera,
+            "data": base64.b64encode(bytes(message.data)).decode("ascii"),
+            "ts": self._stamp_seconds(message),
+            "format": message.format,
+        })
+
+    def _on_camera1(self, message: CompressedImage) -> None:
+        self._emit_ros_camera("camera1", message)
+
+    def _on_camera2(self, message: CompressedImage) -> None:
+        self._emit_ros_camera("camera2", message)
+
+    def _on_synchronized_capture(
+        self,
+        leader: JointState,
+        follower: JointState,
+        camera1: CompressedImage,
+        camera2: CompressedImage,
+    ) -> None:
+        if not self._capture_sync_enabled:
+            return
+        leader_joints = self._from_joint_state(leader)
+        follower_joints = self._from_joint_state(follower)
+        if leader_joints is None or follower_joints is None:
+            return
+        stamps = [
+            self._stamp_seconds(leader),
+            self._stamp_seconds(follower),
+            self._stamp_seconds(camera1),
+            self._stamp_seconds(camera2),
+        ]
+        emit({
+            "type": "capture_sample",
+            "ts": max(stamps),
+            "sensor_skew_ms": (max(stamps) - min(stamps)) * 1000,
+            "leader": leader_joints,
+            "follower": follower_joints,
+            "camera": base64.b64encode(bytes(camera1.data)).decode("ascii"),
+            "camera2": base64.b64encode(bytes(camera2.data)).decode("ascii"),
+        })
+
     def _emit_external_observation(self) -> None:
         if self._latest_follower is None:
             return
@@ -366,6 +485,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--leader-state-topic", default="/leader/joint_states")
     parser.add_argument("--follower-state-topic", default="/follower/joint_states")
+    parser.add_argument("--camera1-topic", default="/camera1/image_raw/compressed")
+    parser.add_argument("--camera2-topic", default="/camera2/image_raw/compressed")
+    parser.add_argument("--capture-sync-slop", type=float, default=0.05)
+    parser.add_argument("--capture-sync-queue", type=int, default=20)
     parser.add_argument(
         "--command-topic",
         default="/follower/joint_trajectory_controller/joint_trajectory",

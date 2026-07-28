@@ -110,7 +110,6 @@
 ```bash
 cd frontend && npm run build
 cd robot-server && npm run build
-cd operator-server && npm run build
 ```
 
 若仓库继续扩展训练逻辑，应为资源估算、状态机、路径校验、发布门禁和统计聚合添加可重复的单元测试；当前仓库没有成熟测试框架时，不为了形式临时引入大型框架。
@@ -142,7 +141,7 @@ cd operator-server && npm run build
 
 ### 已通过
 
-- `frontend`、`robot-server`、`operator-server` 均通过 TypeScript/生产构建；Operator Server 首次构建前按锁文件执行了 `npm ci`。
+- `frontend` 与 `robot-server` 均通过 TypeScript/生产构建。
 - 使用正式 LeRobot Python 环境和 `ENABLE_CAMERA=0` 在独立端口启动 Robot Server，健康检查与构建后静态页面均返回 `200`。
 - 主机检测可返回 CPU、内存、磁盘和 Orin 统一内存 GPU 信息；CPU 训练不作为本项目验收范围。
 - 实时资源接口返回 CPU、内存、磁盘、GPU load、温度和采样时间。

@@ -14,6 +14,8 @@ robot-server
 lerobot_web_bridge (ROS 2 / 系统 Python)
   ├── /leader/joint_states                         sensor_msgs/JointState
   ├── /follower/joint_states                       sensor_msgs/JointState
+  ├── /camera1/image_raw/compressed                 sensor_msgs/CompressedImage
+  ├── /camera2/image_raw/compressed                 sensor_msgs/CompressedImage
   └── /follower/joint_trajectory_controller/
       joint_trajectory                             trajectory_msgs/JointTrajectory
             │
@@ -30,6 +32,8 @@ ROS 2 Humble 的 `rclpy` 和 LeRobot 环境可能使用不同 Python ABI，所�
 | `/leader/joint_states` | `sensor_msgs/msg/JointState` | Leader → 系统 | `name` 与 `position` 必须等长 |
 | `/follower/joint_states` | `sensor_msgs/msg/JointState` | Robot → 系统 | 位置使用 ROS 单位（旋转关节为 rad） |
 | `/follower/joint_trajectory_controller/joint_trajectory` | `trajectory_msgs/msg/JointTrajectory` | 系统 → Robot | 当前遥操作使用最后一个 point |
+| `/camera1/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` | Camera → 系统 | JPEG，必须填写采集时间戳 |
+| `/camera2/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` | Camera → 系统 | JPEG，必须填写采集时间戳 |
 
 SO-101 的前五个 LeRobot 角度从 degree 转为 rad。LeRobot 的夹爪 `0..100` 按仓库 URDF 的 `-0.174533..1.74533 rad` 线性转换。ROS 消息中不暴露 LeRobot 的归一化单位。
 
@@ -105,6 +109,10 @@ CONTROL_BACKEND=ros2 ROS2_DRIVER=external ./start_robot.sh
 `external` 模式下，桥只连接上述 ROS 2 话题，并原样转发任意 `JointState` 的关节名称和 rad 位置，本地 ROS Leader 的名称/位置也会原样组成 `JointTrajectory`。不同关节数已经能在网页状态表动态显示。非 SO-101 的网页主动命令应带 `units: "ros"`；控制配置、关节限制和 URDF 应由后续的 robot profile 提供，不能假设所有机械臂都是 SO-101 六关节布局。
 
 数据采集同样不写死 SO-101：第一组完整的 Leader action 与 Follower state 决定 LeRobotDataset 的关节名称和顺序，续录时会验证 schema。两路 JPEG 相机和关节数据由 Robot Server 按录制 FPS 采样，并在写入前执行新鲜度及双相机时间偏差检查。
+
+采集桥使用 `message_filters.ApproximateTimeSynchronizer` 按四路消息的 `header.stamp` 对齐 Leader、Follower 和两路相机。原始五类 ROS2 话题同时由 rosbag2 保存到 `DATASET_ROOT/.lerobot-web/raw-bags/<数据集>/`，用于故障恢复、重放和未来重新生成 LeRobotDataset。bag 使用专用 QoS override，让 JointState/CompressedImage 的 Best-Effort 发布端能被可靠记录。安装 `ros-humble-rosbag2-storage-mcap` 后使用 MCAP；未安装时可回退 sqlite3。
+
+LeRobot 仍位于独立 Python 进程。`bridge/lerobot_dataset_compat.py` 隔离 0.4 的构造器/图片写入器 API和 0.5+ 的 `resume`、`DatasetWriter`、`finalize` 与流式编码 API，切换 LeRobot 版本不影响 ROS2 话题契约。
 
 ## 安全边界
 

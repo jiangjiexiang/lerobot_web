@@ -1,5 +1,5 @@
-#!/bin/bash
-# 遥操作与数据平台一键启动（Robot Server + Vite）
+#!/usr/bin/env bash
+# ROS 2 遥操作、数据采集与数据管理一键启动（Robot Server + Vite）
 # 用法: ./start_robot.sh
 
 set -e
@@ -33,14 +33,18 @@ HTTPS_CERT="${HTTPS_CERT:-}"
 HTTPS_KEY="${HTTPS_KEY:-}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 
-echo "=== 遥操作与数据平台一键启动 ==="
+echo "=== ROS 2 数据采集平台一键启动 ==="
 echo "Python: $PYTHON_PATH"
 if [ "$CONTROL_BACKEND" = "ros2" ]; then
     echo "控制后端: ros2 / $ROS2_DRIVER${ROS2_COMMAND_SOURCE:+ / $ROS2_COMMAND_SOURCE}"
 else
     echo "控制后端: legacy"
 fi
-echo "摄像头: 自动检测 USB 摄像头 (MJPG ${CAMERA_WIDTH}x${CAMERA_HEIGHT}@$CAMERA_FPS FPS)"
+if [ "$ENABLE_CAMERA" = "0" ]; then
+    echo "摄像头: 外部 ROS 2 话题"
+else
+    echo "摄像头: 自动检测 USB 摄像头 (MJPG/YUYV ${CAMERA_WIDTH}x${CAMERA_HEIGHT}@$CAMERA_FPS FPS)"
+fi
 
 # 清理上次异常退出后仍占用服务端口的进程。
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
@@ -136,10 +140,14 @@ if [ "$CONTROL_BACKEND" = "ros2" ]; then
     fi
     # ROS 2 Humble 的 rclpy 必须由它对应的系统 Python 运行；LeRobot 仍由上面的独立环境运行。
     source "$ROS_SETUP"
-    if ! "$ROS_PYTHON_PATH" -c "import rclpy, sensor_msgs, trajectory_msgs" >/dev/null 2>&1; then
+    if ! "$ROS_PYTHON_PATH" -c "import rclpy, message_filters, sensor_msgs, trajectory_msgs" >/dev/null 2>&1; then
         echo "错误: $ROS_PYTHON_PATH 无法导入 ROS 2 Python 包"
         echo "请确认 ROS_DISTRO=$ROS_DISTRO 与 ROS_PYTHON_PATH 匹配"
         exit 1
+    fi
+    if ! ros2 pkg prefix rosbag2_storage_mcap >/dev/null 2>&1; then
+        echo "警告: 未安装 MCAP 插件，原始 ROS bag 将回退到 sqlite3"
+        echo "      安装命令: bash scripts/install_ros2_capture_deps.sh"
     fi
 fi
 
@@ -157,7 +165,8 @@ fi
 chmod +x "$DIR/robot-server/node_modules/.bin/"* 2>/dev/null || true
 chmod +x "$DIR/frontend/node_modules/.bin/"* 2>/dev/null || true
 
-# Robot Server 会直接提供构建后的前端，本机模式不再依赖额外的 5173 代理。
+# 先构建生产资源，Robot Server 可托管该目录；一键脚本仍启动 Vite，
+# 以便统一提供 5173 入口、API/WebSocket 代理和可选的局域网 HTTPS。
 echo "[3/4] 构建 frontend..."
 cd "$DIR/frontend"
 npm run build

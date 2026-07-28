@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-单进程遥操作 + MuJoCo 镜像脚本
-同时连接 Leader (ttyACM1) 和 Follower (ttyACM0)，Leader 控制 Follower，Follower 状态实时镜像到 MuJoCo。
+LeRobot SO-101 串口驱动。
+
+同时连接 Leader 和 Follower，或接受 ROS 2 适配层经 stdin 发送的动作。
+文件名为兼容既有启动配置暂时保留；当前不加载或运行 MuJoCo。
 
 用法:
     python teleop_mujoco.py \
@@ -32,9 +34,6 @@ logging.basicConfig(level=logging.INFO, format="[Teleop] %(message)s")
 logger = logging.getLogger(__name__)
 
 MOTOR_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "menagerie_so_arm100", "scene.xml")
-
-
 class RemoteLeaderInput:
     """从 stdin 接收 robot-server 转发的网页 Leader 动作；永不写入 Leader 串口。"""
     def __init__(self):
@@ -133,124 +132,8 @@ def write_positions(bus: FeetechMotorsBus, goal_pos: dict, *, normalize: bool = 
     bus.sync_write("Goal_Position", goal_pos, normalize=normalize)
 
 
-class MuJoCoSim:
-    """MuJoCo 仿真管理器"""
-
-    # lerobot 电机名称 -> MuJoCo Menagerie 关节名称
-    JOINT_MAP = {
-        "shoulder_pan": "Rotation",
-        "shoulder_lift": "Pitch",
-        "elbow_flex": "Elbow",
-        "wrist_flex": "Wrist_Pitch",
-        "wrist_roll": "Wrist_Roll",
-        "gripper": "Jaw",
-    }
-
-    # 方向反转标志: True 表示真实机械臂的正方向对应模型的负方向
-    # 根据机械臂安装方向和 Menagerie 模型关节轴方向调整
-    JOINT_INVERT = {
-        "shoulder_pan": False,
-        "shoulder_lift": False,
-        "elbow_flex": False,
-        "wrist_flex": False,
-        "wrist_roll": False,
-        "gripper": False,
-    }
-
-    # STS3215 分辨率
-    MOTOR_RESOLUTION = 4095
-
-    # Full HD 网页流。帧率由 --fps 控制（前端可选 60 FPS）。
-    def __init__(self, model_path: str, calibration: dict | None = None, width: int = 1920, height: int = 1080):
-        self.model = mujoco.MjModel.from_xml_path(model_path)
-        self.data = mujoco.MjData(self.model)
-        self.renderer = mujoco.Renderer(self.model, height=height, width=width)
-        self.width = width
-        self.height = height
-
-        self.renderer._scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = True
-        self.renderer._scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = True
-
-        # 计算每个关节的线性映射: 真实角度范围 → 模型弧度范围
-        # model_rad = (input - real_min) / (real_max - real_min) * (model_max - model_min) + model_min
-        self.joint_mapping = {}
-        for lerobot_name, mj_name in self.JOINT_MAP.items():
-            joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, mj_name)
-            if joint_id < 0:
-                continue
-
-            qpos_addr = self.model.jnt_qposadr[joint_id]
-            model_min = self.model.jnt_range[joint_id, 0]
-            model_max = self.model.jnt_range[joint_id, 1]
-
-            # 计算真实机械臂的角度范围
-            if calibration and lerobot_name in calibration:
-                cal = calibration[lerobot_name]
-                mid = (cal.range_min + cal.range_max) / 2
-                if lerobot_name == "gripper":
-                    # RANGE_0_100 模式: 0 → 100
-                    real_min, real_max = 0.0, 100.0
-                else:
-                    # DEGREES 模式
-                    real_min = (cal.range_min - mid) * 360 / self.MOTOR_RESOLUTION
-                    real_max = (cal.range_max - mid) * 360 / self.MOTOR_RESOLUTION
-            else:
-                # 无标定: 使用原始编码器值 0-4095
-                real_min, real_max = 0.0, float(self.MOTOR_RESOLUTION)
-
-            self.joint_mapping[lerobot_name] = {
-                "qpos_addr": qpos_addr,
-                "real_min": real_min,
-                "real_max": real_max,
-                "model_min": model_min,
-                "model_max": model_max,
-                "invert": self.JOINT_INVERT.get(lerobot_name, False),
-            }
-
-            invert_str = " (反转)" if self.JOINT_INVERT.get(lerobot_name, False) else ""
-            logger.info(
-                f"  关节映射 {lerobot_name}→{mj_name}: "
-                f"真实[{real_min:.1f}, {real_max:.1f}] → 模型[{np.degrees(model_min):.1f}°, {np.degrees(model_max):.1f}°]{invert_str}"
-            )
-
-    def update_joints(self, joints: dict, raw: bool = False):
-        """将关节角度写入 MuJoCo (线性映射，支持方向反转)"""
-        for lerobot_name, val in joints.items():
-            if lerobot_name not in self.joint_mapping:
-                continue
-            m = self.joint_mapping[lerobot_name]
-            # 线性映射: real_range → model_range
-            if m["real_max"] != m["real_min"]:
-                ratio = (val - m["real_min"]) / (m["real_max"] - m["real_min"])
-                ratio = max(0.0, min(1.0, ratio))  # clamp 0-1
-                if m["invert"]:
-                    ratio = 1.0 - ratio  # 反转方向
-                angle_rad = ratio * (m["model_max"] - m["model_min"]) + m["model_min"]
-            else:
-                angle_rad = m["model_min"]
-            self.data.qpos[m["qpos_addr"]] = angle_rad
-
-    def step(self):
-        mujoco.mj_forward(self.model, self.data)
-
-    def render(self, jpeg_quality: int = 82) -> bytes:
-        self.renderer.update_scene(self.data)
-        light = self.renderer._scene.lights[0]
-        light.diffuse = np.array([1.0, 1.0, 1.0])
-        light.specular = np.array([0.6, 0.6, 0.6])
-        light.ambient = np.array([0.6, 0.6, 0.6])
-        frame = self.renderer.render()
-        # MuJoCo 返回 RGB，OpenCV 编码前转换为 BGR，避免颜色失真。
-        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        _, jpeg = cv2.imencode(
-            ".jpg", frame_bgr,
-            [cv2.IMWRITE_JPEG_QUALITY, max(1, min(100, jpeg_quality))],
-        )
-        return jpeg.tobytes()
-
-
 def main():
-    parser = argparse.ArgumentParser(description="单进程遥操作 + MuJoCo 镜像")
+    parser = argparse.ArgumentParser(description="LeRobot SO-101 串口驱动")
     parser.add_argument("--follower-port", type=str, required=True, help="Follower 串口")
     parser.add_argument("--follower-id", type=str, default="", help="Follower ID")
     parser.add_argument("--leader-port", type=str, default="", help="Leader 串口")
@@ -329,11 +212,11 @@ def main():
             if leader_bus is not None:
                 leader_bus.disconnect()
             parser.error("ROS 2 外部命令模式要求 Leader 和 Follower 标定完整，拒绝使用原始编码器单位")
-        logger.warning("无标定文件，使用原始编码器值 (0-4095)，MuJoCo 将按原始值映射弧度")
+        logger.warning("无标定文件，使用原始编码器值 (0-4095)")
 
     period = 1.0 / args.fps
     frame_count = 0
-    logger.info(f"控制 {args.fps} FPS | MuJoCo 已关闭")
+    logger.info(f"控制频率: {args.fps} FPS")
     camera = CameraCapture(args.camera_index) if args.camera_index >= 0 else None
     if camera and camera.available:
         logger.info(f"摄像头 {args.camera_index} 初始化成功（最大 {args.camera_fps} FPS）")
@@ -357,102 +240,31 @@ def main():
         source = command_input.latest(args.command_timeout) if args.external_command else leader_joints
         return {k: v for k, v in (source or {}).items() if k in follower_bus.motors}
 
-    # MuJoCo 已永久关闭；保留旧参数仅为兼容已有启动配置。
-    if False:
-        # === 交互式查看器模式 ===
-        logger.info("启动 MuJoCo 交互式查看器...")
-        logger.info("按 ESC 或关闭窗口退出")
+    logger.info("开始遥操作循环")
+    try:
+        while True:
+            loop_start = time.perf_counter()
+            leader_joints = get_leader_joints()
+            goal_pos = get_follower_goal(leader_joints)
+            if goal_pos:
+                write_positions(follower_bus, goal_pos, normalize=not use_raw)
+            follower_joints = read_positions(follower_bus, normalize=not use_raw)
+            print(json.dumps({
+                "type": "teleop_observation",
+                "leader": leader_joints,
+                "follower": follower_joints,
+                "ts": time.time(),
+            }), flush=True)
+            emit_camera_frame()
 
-        with mujoco.viewer.launch_passive(sim.model, sim.data) as viewer:
-            viewer.opt.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = True
-            viewer.opt.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = True
-            viewer.opt.flags[mujoco.mjtRndFlag.mjRND_SKYBOX] = True
-            viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = True
-
-            logger.info("查看器已打开，开始遥操作循环")
-            while viewer.is_running():
-                loop_start = time.perf_counter()
-
-                # 1. 读取 leader 角度
-                leader_joints = get_leader_joints()
-
-                # 2. 发送 leader 角度到 follower
-                goal_pos = get_follower_goal(leader_joints)
-                if goal_pos:
-                    write_positions(follower_bus, goal_pos, normalize=not use_raw)
-
-                # 3. 读取 follower 实际角度
-                follower_joints = read_positions(follower_bus, normalize=not use_raw)
-
-                # 4. 更新 MuJoCo
-                # 5. 同步查看器
-                viewer.sync()
-
-                # 6. 输出 JSON
-                msg = {
-                    "type": "teleop_observation",
-                    "leader": leader_joints,
-                    "follower": follower_joints,
-                    "ts": time.time(),
-                }
-                print(json.dumps(msg), flush=True)
-
-                # 同时输出网页所需的离屏帧。这样开启原生查看器时，浏览器也能显示仿真画面。
-                emit_camera_frame()
-
-                # 等待
-                dt = time.perf_counter() - loop_start
-                sleep_time = period - dt
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-
-                frame_count += 1
-                if frame_count % 100 == 0:
-                    logger.info(f"已运行 {frame_count} 帧 | leader_pan={leader_joints.get('shoulder_pan', 0):.1f} follower_pan={follower_joints.get('shoulder_pan', 0):.1f}")
-
-    else:
-        # === 离屏渲染模式 ===
-        logger.info("开始遥操作循环 (离屏渲染)")
-        try:
-            while True:
-                loop_start = time.perf_counter()
-
-                # 1. 读取 leader 角度
-                leader_joints = get_leader_joints()
-
-                # 2. 发送到 follower
-                goal_pos = get_follower_goal(leader_joints)
-                if goal_pos:
-                    write_positions(follower_bus, goal_pos, normalize=not use_raw)
-
-                # 3. 读取 follower 实际角度
-                follower_joints = read_positions(follower_bus, normalize=not use_raw)
-
-                # 4. 更新 MuJoCo + 渲染
-                # 5. 输出 JSON
-                obs_msg = {
-                    "type": "teleop_observation",
-                    "leader": leader_joints,
-                    "follower": follower_joints,
-                    "ts": time.time(),
-                }
-                print(json.dumps(obs_msg), flush=True)
-
-                # 6. 输出 MuJoCo 帧
-                emit_camera_frame()
-
-                # 等待
-                dt = time.perf_counter() - loop_start
-                sleep_time = period - dt
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-
-                frame_count += 1
-                if frame_count % 100 == 0:
-                    logger.info(f"已运行 {frame_count} 帧")
-
-        except KeyboardInterrupt:
-            logger.info("遥操作退出")
+            sleep_time = period - (time.perf_counter() - loop_start)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            frame_count += 1
+            if frame_count % 100 == 0:
+                logger.info(f"已运行 {frame_count} 帧")
+    except KeyboardInterrupt:
+        logger.info("遥操作退出")
 
     # 清理
     follower_bus.disable_torque()

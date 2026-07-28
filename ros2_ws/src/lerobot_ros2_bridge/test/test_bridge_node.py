@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import rclpy
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import CompressedImage, JointState
 from trajectory_msgs.msg import JointTrajectory
 from trajectory_msgs.msg import JointTrajectoryPoint
 
@@ -50,6 +50,10 @@ class BridgeNodeTests(unittest.TestCase):
                 f"{namespace}/follower",
                 "--command-topic",
                 f"{namespace}/command",
+                "--camera1-topic",
+                f"{namespace}/camera1",
+                "--camera2-topic",
+                f"{namespace}/camera2",
             ]
         )
         return LeRobotWebRosBridge(args, start_stdio_thread=False)
@@ -99,11 +103,38 @@ class BridgeNodeTests(unittest.TestCase):
         self.assertEqual(parse_args(["--remote-leader"]).command_source, "web")
         self.assertEqual(parse_args([]).command_source, "leader")
 
+    def test_synchronized_capture_uses_ros_header_stamps(self):
+        node = self.make_node()
+        leader = JointState()
+        follower = JointState()
+        leader.name = follower.name = ["joint"]
+        leader.position = [0.5]
+        follower.position = [0.25]
+        camera1 = CompressedImage()
+        camera2 = CompressedImage()
+        camera1.data = b"first"
+        camera2.data = b"second"
+        for index, message in enumerate((leader, follower, camera1, camera2)):
+            message.header.stamp.sec = 10
+            message.header.stamp.nanosec = index * 10_000_000
+        node._capture_sync_enabled = True
+        try:
+            with patch("lerobot_ros2_bridge.web_bridge.emit") as emit:
+                node._on_synchronized_capture(leader, follower, camera1, camera2)
+            payload = emit.call_args.args[0]
+            self.assertEqual(payload["type"], "capture_sample")
+            self.assertAlmostEqual(payload["sensor_skew_ms"], 30.0)
+            self.assertEqual(payload["leader"], {"joint": 0.5})
+        finally:
+            node.destroy_node()
+
     def test_external_bridge_process_forwards_ros_state_and_desired_command(self):
         namespace = f"/integration/t{time.time_ns()}"
         leader_topic = f"{namespace}/leader"
         follower_topic = f"{namespace}/follower"
         command_topic = f"{namespace}/command"
+        camera1_topic = f"{namespace}/camera1"
+        camera2_topic = f"{namespace}/camera2"
         child = subprocess.Popen(
             [
                 sys.executable,
@@ -119,22 +150,31 @@ class BridgeNodeTests(unittest.TestCase):
                 follower_topic,
                 "--command-topic",
                 command_topic,
+                "--camera1-topic",
+                camera1_topic,
+                "--camera2-topic",
+                camera2_topic,
             ],
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
         )
         probe = rclpy.create_node(f"bridge_probe_{time.time_ns()}")
+        leader_pub = probe.create_publisher(JointState, leader_topic, 1)
         follower_pub = probe.create_publisher(JointState, follower_topic, 1)
         command_pub = probe.create_publisher(JointTrajectory, command_topic, 1)
+        camera1_pub = probe.create_publisher(CompressedImage, camera1_topic, 1)
+        camera2_pub = probe.create_publisher(CompressedImage, camera2_topic, 1)
         try:
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 if (
                     probe.count_subscribers(follower_topic) > 0
                     and probe.count_subscribers(command_topic) > 0
+                    and probe.count_subscribers(camera1_topic) > 0
+                    and probe.count_subscribers(camera2_topic) > 0
                 ):
                     break
                 rclpy.spin_once(probe, timeout_sec=0.05)
@@ -176,6 +216,43 @@ class BridgeNodeTests(unittest.TestCase):
                     break
             self.assertIsNotNone(observed, f"bridge output: {output_lines}")
             self.assertEqual(observed["follower"], {"vendor_joint": 0.25})
+
+            child.stdin.write(json.dumps({"type": "capture_sync", "enabled": True}) + "\n")
+            child.stdin.flush()
+            capture = None
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                stamp = probe.get_clock().now().to_msg()
+                leader = JointState()
+                leader.header.stamp = stamp
+                leader.name = ["vendor_joint"]
+                leader.position = [0.5]
+                follower.header.stamp = stamp
+                camera1 = CompressedImage()
+                camera1.header.stamp = stamp
+                camera1.data = b"jpeg-one"
+                camera2 = CompressedImage()
+                camera2.header.stamp = stamp
+                camera2.data = b"jpeg-two"
+                leader_pub.publish(leader)
+                follower_pub.publish(follower)
+                camera1_pub.publish(camera1)
+                camera2_pub.publish(camera2)
+                for key, _ in selector.select(timeout=0.2):
+                    line = key.fileobj.readline()
+                    output_lines.append(line.rstrip())
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if payload.get("type") == "capture_sample":
+                        capture = payload
+                        break
+                if capture is not None:
+                    break
+            self.assertIsNotNone(capture, f"bridge output: {output_lines}")
+            self.assertEqual(capture["leader"], {"vendor_joint": 0.5})
+            self.assertLess(capture["sensor_skew_ms"], 1.0)
         finally:
             probe.destroy_node()
             child.send_signal(signal.SIGTERM)

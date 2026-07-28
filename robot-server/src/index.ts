@@ -6,7 +6,7 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import crypto from "crypto";
-import { execSync, execFile, spawn, ChildProcess } from "child_process";
+import { execSync, execFile, execFileSync, spawn, ChildProcess } from "child_process";
 import { RobotBridge, BridgeMessage } from "./robotBridge";
 import { MJPEGStreamManager } from "./streams";
 import { RtcGateway } from "./rtcGateway";
@@ -24,6 +24,8 @@ const TELEOP_SCRIPT = CONTROL_BACKEND === "legacy" ? LEGACY_TELEOP_SCRIPT : ROS2
 const CAMERA_SCRIPT = path.join(BRIDGE_DIR, "camera_stream.py");
 const RECORDER_SCRIPT = path.join(BRIDGE_DIR, "dataset_recorder.py");
 const DATASET_CATALOG_SCRIPT = path.join(BRIDGE_DIR, "dataset_catalog.py");
+const ROSBAG_QOS_CONFIG = process.env.ROSBAG_QOS_CONFIG
+  || path.join(__dirname, "../../ros2_ws/src/lerobot_ros2_bridge/config/rosbag_qos.yaml");
 const PYTHON_PATH = process.env.PYTHON_PATH || "python3";
 const CONTROL_PYTHON_PATH = CONTROL_BACKEND === "legacy"
   ? PYTHON_PATH
@@ -36,6 +38,10 @@ const CAMERA_WIDTH = parseInt(process.env.CAMERA_WIDTH || "640", 10);
 const CAMERA_HEIGHT = parseInt(process.env.CAMERA_HEIGHT || "360", 10);
 const RECORDING_MAX_SENSOR_AGE_MS = parseInt(process.env.RECORDING_MAX_SENSOR_AGE_MS || "250", 10);
 const RECORDING_MAX_CAMERA_SKEW_MS = parseInt(process.env.RECORDING_MAX_CAMERA_SKEW_MS || "100", 10);
+const ROSBAG_ENABLED = process.env.ROSBAG_ENABLED !== "0" && process.env.ROSBAG_ENABLED !== "false";
+const ROSBAG_REQUIRE_MCAP = process.env.ROSBAG_REQUIRE_MCAP === "1" || process.env.ROSBAG_REQUIRE_MCAP === "true";
+const DATASET_STREAMING_ENCODING = process.env.DATASET_STREAMING_ENCODING || "auto";
+const DATASET_VIDEO_CODEC = process.env.DATASET_VIDEO_CODEC || "auto";
 const DEFAULT_STREAM_FPS = parseInt(process.env.STREAM_FPS || "0", 10);
 const ENABLE_WEBRTC = process.env.ENABLE_WEBRTC !== "0" && process.env.ENABLE_WEBRTC !== "false";
 const RTC_ICE_SERVERS = [
@@ -139,6 +145,7 @@ let cameraBridge: RobotBridge | null = null;
 let activeCameraIndex = -1;
 let cameraLastFrameAt = 0;
 let cameraError: string | null = null;
+let cameraMetrics: Record<string, unknown> = {};
 let latestCameraFrame: Buffer | null = null;
 function startCamera(index: number): void {
   if (!ENABLE_CAMERA || index < 0) return;
@@ -146,17 +153,27 @@ function startCamera(index: number): void {
   activeCameraIndex = index;
   cameraLastFrameAt = 0;
   cameraError = null;
+  cameraMetrics = {};
   cameraBridge = new RobotBridge(CAMERA_SCRIPT, ["--camera-index", String(index), "--fps", String(CAMERA_FPS), "--width", String(CAMERA_WIDTH), "--height", String(CAMERA_HEIGHT)], PYTHON_PATH);
   cameraBridge.on("message", (msg: BridgeMessage) => {
     if (msg.type === "camera_frame" && msg.data) {
       cameraLastFrameAt = Date.now();
       const jpeg = Buffer.from(msg.data, "base64");
       latestCameraFrame = jpeg;
-      streamManager.updateFrame("camera", jpeg);
-      broadcastBinaryFrame(STREAM_TYPE_CAMERA, typeof msg.ts === "number" ? msg.ts : Date.now() / 1000, jpeg);
+      if (bridge?.isRunning()) {
+        bridge.send({ type: "ros_camera_frame", camera: "camera1", data: msg.data, ts: msg.ts });
+      } else {
+        streamManager.updateFrame("camera", jpeg);
+        broadcastBinaryFrame(STREAM_TYPE_CAMERA, typeof msg.ts === "number" ? msg.ts : Date.now() / 1000, jpeg);
+      }
     } else if (msg.type === "camera_error") {
       cameraError = String(msg.error || "摄像头不可用");
       console.error(`[Camera] ${cameraError}`);
+    } else if (msg.type === "camera_ready") {
+      cameraError = null;
+      cameraMetrics = { ...cameraMetrics, ...msg };
+    } else if (msg.type === "camera_status") {
+      cameraMetrics = { ...cameraMetrics, ...msg };
     }
   });
   cameraBridge.start();
@@ -168,6 +185,7 @@ let cameraBridge2: RobotBridge | null = null;
 let activeCameraIndex2 = -1;
 let camera2LastFrameAt = 0;
 let camera2Error: string | null = null;
+let camera2Metrics: Record<string, unknown> = {};
 let latestCamera2Frame: Buffer | null = null;
 function startCamera2(index: number): void {
   if (!ENABLE_CAMERA || index < 0) return;
@@ -175,17 +193,27 @@ function startCamera2(index: number): void {
   activeCameraIndex2 = index;
   camera2LastFrameAt = 0;
   camera2Error = null;
+  camera2Metrics = {};
   cameraBridge2 = new RobotBridge(CAMERA_SCRIPT, ["--camera-index", String(index), "--fps", String(CAMERA_FPS), "--width", String(CAMERA_WIDTH), "--height", String(CAMERA_HEIGHT)], PYTHON_PATH);
   cameraBridge2.on("message", (msg: BridgeMessage) => {
     if (msg.type === "camera_frame" && msg.data) {
       camera2LastFrameAt = Date.now();
       const jpeg = Buffer.from(msg.data, "base64");
       latestCamera2Frame = jpeg;
-      streamManager.updateFrame("camera2", jpeg);
-      broadcastBinaryFrame(STREAM_TYPE_CAMERA2, typeof msg.ts === "number" ? msg.ts : Date.now() / 1000, jpeg);
+      if (bridge?.isRunning()) {
+        bridge.send({ type: "ros_camera_frame", camera: "camera2", data: msg.data, ts: msg.ts });
+      } else {
+        streamManager.updateFrame("camera2", jpeg);
+        broadcastBinaryFrame(STREAM_TYPE_CAMERA2, typeof msg.ts === "number" ? msg.ts : Date.now() / 1000, jpeg);
+      }
     } else if (msg.type === "camera_error") {
       camera2Error = String(msg.error || "摄像头不可用");
       console.error(`[Camera2] ${camera2Error}`);
+    } else if (msg.type === "camera_ready") {
+      camera2Error = null;
+      camera2Metrics = { ...camera2Metrics, ...msg };
+    } else if (msg.type === "camera_status") {
+      camera2Metrics = { ...camera2Metrics, ...msg };
     }
   });
   cameraBridge2.start();
@@ -219,14 +247,19 @@ interface RecordingStatus {
   episodeTime: number;
   resetTime: number;
   resume: boolean;
+  rawBagPath: string | null;
+  rawBagStorage: string | null;
+  rawBagError: string | null;
 }
 
 let recorder: RobotBridge | null = null;
+let rawBagProcess: ChildProcess | null = null;
 let recorderFramePending = false;
 let nextRecorderFrameAt = 0;
 let recordingStatus: RecordingStatus = {
   state: "idle", dataset: null, task: null, fps: 30, frames: 0,
   episode: null, path: null, error: null, plannedEpisodes: 10, episodeTime: 20, resetTime: 5, resume: false,
+  rawBagPath: null, rawBagStorage: null, rawBagError: null,
 };
 
 function publishRecordingStatus(): void {
@@ -236,6 +269,8 @@ function publishRecordingStatus(): void {
 function requestRecordingSave(): boolean {
   if (!recorder?.isRunning() || !["preparing", "recording"].includes(recordingStatus.state)) return false;
   recordingStatus = { ...recordingStatus, state: "saving" };
+  bridge?.send({ type: "capture_sync", enabled: false });
+  stopRawBag();
   publishRecordingStatus();
   recorder.send({ type: recordingStatus.frames > 0 ? "save_episode" : "cancel" });
   return true;
@@ -243,6 +278,84 @@ function requestRecordingSave(): boolean {
 
 function recordingIsActive(): boolean {
   return ["preparing", "recording", "saving"].includes(recordingStatus.state);
+}
+
+function hasRosbagStorage(storage: string): boolean {
+  try {
+    execFileSync("ros2", ["pkg", "prefix", `rosbag2_storage_${storage}`], { stdio: "ignore" });
+    return true;
+  } catch {
+    return storage === "sqlite3";
+  }
+}
+
+function startRawBag(datasetRoot: string): void {
+  if (!ROSBAG_ENABLED) return;
+  let storage = "mcap";
+  if (!hasRosbagStorage(storage)) {
+    if (ROSBAG_REQUIRE_MCAP) {
+      throw new Error("未安装 ros-humble-rosbag2-storage-mcap，且 ROSBAG_REQUIRE_MCAP 已启用");
+    }
+    storage = "sqlite3";
+  }
+  const bagPath = path.join(
+    DATASET_ROOT,
+    ".lerobot-web",
+    "raw-bags",
+    path.basename(datasetRoot),
+    `episode-${new Date().toISOString().replace(/[:.]/g, "-")}`,
+  );
+  fs.mkdirSync(path.dirname(bagPath), { recursive: true });
+  const topics = [
+    "/leader/joint_states",
+    "/follower/joint_states",
+    "/follower/joint_trajectory_controller/joint_trajectory",
+    "/camera1/image_raw/compressed",
+    "/camera2/image_raw/compressed",
+  ];
+  const child = spawn(
+    "ros2",
+    [
+      "bag", "record",
+      "--storage", storage,
+      "--output", bagPath,
+      "--qos-profile-overrides-path", ROSBAG_QOS_CONFIG,
+      ...topics,
+    ],
+    { stdio: ["ignore", "ignore", "pipe"] },
+  );
+  rawBagProcess = child;
+  let errorOutput = "";
+  child.stderr?.on("data", (chunk) => {
+    errorOutput = (errorOutput + String(chunk)).slice(-4000);
+  });
+  child.on("error", (error) => {
+    if (rawBagProcess === child) rawBagProcess = null;
+    recordingStatus = { ...recordingStatus, rawBagError: error.message };
+    publishRecordingStatus();
+  });
+  child.on("exit", (code, signal) => {
+    if (rawBagProcess === child) rawBagProcess = null;
+    if (code && recordingIsActive()) {
+      recordingStatus = {
+        ...recordingStatus,
+        rawBagError: errorOutput.trim() || `ros2 bag 异常退出 (code=${code}, signal=${signal})`,
+      };
+      publishRecordingStatus();
+    }
+  });
+  recordingStatus = {
+    ...recordingStatus,
+    rawBagPath: bagPath,
+    rawBagStorage: storage,
+    rawBagError: storage === "mcap" ? null : "MCAP 插件未安装，已回退 sqlite3",
+  };
+}
+
+function stopRawBag(): void {
+  const child = rawBagProcess;
+  if (!child || child.exitCode !== null) return;
+  child.kill("SIGINT");
 }
 
 function cleanDatasetName(value: unknown): string | null {
@@ -1206,16 +1319,15 @@ function buildReview(body: Record<string, unknown>, previous?: EpisodeReview): E
   };
 }
 
-function recordObservation(message: BridgeMessage): void {
+function recordCaptureSample(message: BridgeMessage): void {
   if (recordingStatus.state !== "recording" || !recorder?.isRunning() || recorderFramePending) return;
   const now = Date.now();
-  if (now < nextRecorderFrameAt || !latestCameraFrame || !latestCamera2Frame) return;
+  if (now < nextRecorderFrameAt || !message.camera || !message.camera2) return;
   if (
-    now - cameraLastFrameAt > RECORDING_MAX_SENSOR_AGE_MS
-    || now - camera2LastFrameAt > RECORDING_MAX_SENSOR_AGE_MS
-    || Math.abs(cameraLastFrameAt - camera2LastFrameAt) > RECORDING_MAX_CAMERA_SKEW_MS
+    !message.leader
+    || !message.follower
+    || Number(message.sensor_skew_ms || 0) > RECORDING_MAX_CAMERA_SKEW_MS
   ) return;
-  if (!message.leader || !message.follower) return;
 
   recorderFramePending = true;
   nextRecorderFrameAt = now + 1000 / recordingStatus.fps;
@@ -1223,8 +1335,8 @@ function recordObservation(message: BridgeMessage): void {
     type: "record_frame",
     leader: message.leader,
     follower: message.follower,
-    camera: latestCameraFrame.toString("base64"),
-    camera2: latestCamera2Frame.toString("base64"),
+    camera: message.camera,
+    camera2: message.camera2,
   });
 }
 
@@ -2003,6 +2115,8 @@ app.post("/api/recording/start", (req, res) => {
     "--fps", String(fps),
     "--task", task,
     "--robot-type", ROS2_DRIVER === "lerobot" ? "so101_follower" : "ros2_external",
+    "--streaming-encoding", DATASET_STREAMING_ENCODING,
+    ...(DATASET_VIDEO_CODEC ? ["--vcodec", DATASET_VIDEO_CODEC] : []),
   ], PYTHON_PATH);
   recorder = startedRecorder;
   recorderFramePending = false;
@@ -2010,13 +2124,27 @@ app.post("/api/recording/start", (req, res) => {
   recordingStatus = {
     state: "preparing", dataset, task, fps, frames: 0,
     episode: null, path: datasetPath, error: null, plannedEpisodes, episodeTime, resetTime, resume,
+    rawBagPath: null, rawBagStorage: null, rawBagError: null,
   };
+  try {
+    startRawBag(datasetPath);
+  } catch (error) {
+    recorder = null;
+    recordingStatus = {
+      ...recordingStatus,
+      state: "error",
+      error: error instanceof Error ? error.message : String(error),
+    };
+    res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    return;
+  }
 
   startedRecorder.on("message", (msg: BridgeMessage) => {
     if (recorder !== startedRecorder) return;
     switch (msg.type) {
       case "recorder_ready":
         recordingStatus = { ...recordingStatus, state: "recording" };
+        bridge?.send({ type: "capture_sync", enabled: true });
         break;
       case "dataset_opened":
         recordingStatus = {
@@ -2044,10 +2172,14 @@ app.post("/api/recording/start", (req, res) => {
         };
         break;
       case "recording_cancelled":
+        bridge?.send({ type: "capture_sync", enabled: false });
+        stopRawBag();
         recorderFramePending = false;
         recordingStatus = { ...recordingStatus, state: "idle", frames: 0 };
         break;
       case "recorder_error":
+        bridge?.send({ type: "capture_sync", enabled: false });
+        stopRawBag();
         recorderFramePending = false;
         recordingStatus = { ...recordingStatus, state: "error", error: String(msg.error || "录制进程异常") };
         break;
@@ -2060,6 +2192,8 @@ app.post("/api/recording/start", (req, res) => {
     if (recorder !== startedRecorder) return;
     recorder = null;
     recorderFramePending = false;
+    bridge?.send({ type: "capture_sync", enabled: false });
+    stopRawBag();
     if (recordingIsActive()) {
       recordingStatus = {
         ...recordingStatus,
@@ -2072,6 +2206,8 @@ app.post("/api/recording/start", (req, res) => {
   startedRecorder.on("error", (error) => {
     if (recorder !== startedRecorder) return;
     recordingStatus = { ...recordingStatus, state: "error", error: error.message };
+    bridge?.send({ type: "capture_sync", enabled: false });
+    stopRawBag();
     publishRecordingStatus();
   });
   startedRecorder.start();
@@ -2163,18 +2299,36 @@ app.get("/api/self-check", (req, res) => {
     } catch { /* invalid or missing calibration */ }
   }
 
-  const cameraStatus = (index: number, child: RobotBridge | null, lastFrameAt: number, error: string | null) => ({
+  const cameraStatus = (
+    index: number,
+    child: RobotBridge | null,
+    lastFrameAt: number,
+    error: string | null,
+    metrics: Record<string, unknown>,
+  ) => ({
     index,
     detected: index >= 0 && detected.includes(index),
     processRunning: Boolean(child?.isRunning()),
     frameFresh: lastFrameAt > 0 && now - lastFrameAt < 2000,
     lastFrameAgeMs: lastFrameAt > 0 ? now - lastFrameAt : null,
     error,
+    metrics,
   });
 
   res.json({
     checkedAt: new Date(now).toISOString(),
     server: { ok: true, running: bridge ? bridge.isRunning() && !stopping : false },
+    capture: {
+      rosbagEnabled: ROSBAG_ENABLED,
+      mcapAvailable: hasRosbagStorage("mcap"),
+      storage: hasRosbagStorage("mcap") ? "mcap" : "sqlite3",
+      synchronizedTopics: [
+        "/leader/joint_states",
+        "/follower/joint_states",
+        "/camera1/image_raw/compressed",
+        "/camera2/image_raw/compressed",
+      ],
+    },
     follower: {
       ports: serialPorts,
       portPresent: serialPorts.length > 0,
@@ -2183,8 +2337,8 @@ app.get("/api/self-check", (req, res) => {
     },
     camerasDetected: detected,
     cameras: [
-      cameraStatus(activeCameraIndex, cameraBridge, cameraLastFrameAt, cameraError),
-      cameraStatus(activeCameraIndex2, cameraBridge2, camera2LastFrameAt, camera2Error),
+      cameraStatus(activeCameraIndex, cameraBridge, cameraLastFrameAt, cameraError, cameraMetrics),
+      cameraStatus(activeCameraIndex2, cameraBridge2, camera2LastFrameAt, camera2Error, camera2Metrics),
     ],
   });
 });
@@ -2294,15 +2448,28 @@ app.post("/api/start", (req, res) => {
       case "teleop_observation":
         latestObservation = msg;
         latestObservationAt = Date.now();
-        recordObservation(msg);
         broadcastControl(msg);
         break;
 
-      case "camera_frame":
-        if (msg.data) {
+      case "capture_sample":
+        recordCaptureSample(msg);
+        break;
+
+      case "ros_camera_frame":
+        if (msg.data && (msg.camera === "camera1" || msg.camera === "camera2")) {
           const jpeg = Buffer.from(msg.data, "base64");
-          streamManager.updateFrame("camera", jpeg);
-          broadcastBinaryFrame(STREAM_TYPE_CAMERA, typeof msg.ts === "number" ? msg.ts : Date.now() / 1000, jpeg);
+          const timestamp = typeof msg.ts === "number" ? msg.ts : Date.now() / 1000;
+          if (msg.camera === "camera1") {
+            latestCameraFrame = jpeg;
+            cameraLastFrameAt = Date.now();
+            streamManager.updateFrame("camera", jpeg);
+            broadcastBinaryFrame(STREAM_TYPE_CAMERA, timestamp, jpeg);
+          } else {
+            latestCamera2Frame = jpeg;
+            camera2LastFrameAt = Date.now();
+            streamManager.updateFrame("camera2", jpeg);
+            broadcastBinaryFrame(STREAM_TYPE_CAMERA2, timestamp, jpeg);
+          }
         }
         break;
 
@@ -2358,6 +2525,8 @@ app.get("/api/status", (req, res) => {
       leaderState: "/leader/joint_states",
       followerState: "/follower/joint_states",
       command: "/follower/joint_trajectory_controller/joint_trajectory",
+      camera1: "/camera1/image_raw/compressed",
+      camera2: "/camera2/image_raw/compressed",
     } : null,
   });
 });
@@ -2560,6 +2729,7 @@ function shutdown(): void {
   void rtcGateway.close();
   if (cameraBridge) cameraBridge.stop();
   if (cameraBridge2) cameraBridge2.stop();
+  stopRawBag();
   if (recorder) recorder.stop();
   for (const child of trainingProcesses.values()) child.kill("SIGTERM");
   for (const child of evaluationProcesses.values()) child.kill("SIGTERM");

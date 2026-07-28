@@ -13,6 +13,13 @@ import numpy as np
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
+from lerobot_dataset_compat import (
+    cancel_dataset,
+    capabilities,
+    create_dataset,
+    finalize_dataset,
+    resume_dataset,
+)
 
 DEFAULT_JOINT_NAMES = [
     "shoulder_pan",
@@ -75,7 +82,12 @@ def open_dataset(
     expected_features = dataset_features(camera, camera2, joint_names)
 
     if info_file.exists():
-        dataset = LeRobotDataset(args.repo_id, root=root)
+        dataset = resume_dataset(
+            repo_id=args.repo_id,
+            root=root,
+            streaming_encoding=args.streaming_encoding,
+            vcodec=args.vcodec,
+        )
         if dataset.fps != args.fps:
             raise ValueError(f"已有数据集 FPS 为 {dataset.fps}，不能用 {args.fps} FPS 续录")
         for key, expected in expected_features.items():
@@ -86,18 +98,17 @@ def open_dataset(
                 or actual.get("names") != expected.get("names")
             ):
                 raise ValueError(f"已有数据集特征不兼容: {key}")
-        dataset.start_image_writer(num_processes=0, num_threads=4)
         return dataset
 
     root.parent.mkdir(parents=True, exist_ok=True)
-    return LeRobotDataset.create(
+    return create_dataset(
         repo_id=args.repo_id,
         fps=args.fps,
         root=root,
         robot_type=args.robot_type,
         features=expected_features,
-        use_videos=True,
-        image_writer_threads=4,
+        streaming_encoding=args.streaming_encoding,
+        vcodec=args.vcodec,
     )
 
 
@@ -108,13 +119,24 @@ def main() -> None:
     parser.add_argument("--fps", type=int, required=True)
     parser.add_argument("--task", required=True)
     parser.add_argument("--robot-type", default="ros2_robot")
+    parser.add_argument("--streaming-encoding", choices=("auto", "on", "off"), default="auto")
+    parser.add_argument("--vcodec", default="")
     args = parser.parse_args()
+    dataset_capabilities = capabilities()
+    args.streaming_encoding = args.streaming_encoding == "on" or (
+        args.streaming_encoding == "auto" and dataset_capabilities.streaming_encoding
+    )
+    args.vcodec = args.vcodec or None
 
     dataset = None
     frame_count = 0
     completed = False
     joint_names = None
-    emit({"type": "recorder_ready"})
+    emit({
+        "type": "recorder_ready",
+        "lerobot_version": dataset_capabilities.version,
+        "streaming_encoding": args.streaming_encoding,
+    })
 
     try:
         for line in sys.stdin:
@@ -154,7 +176,7 @@ def main() -> None:
                     raise SystemExit(2)
                 episode_index = dataset.num_episodes
                 dataset.save_episode(parallel_encoding=True)
-                dataset.stop_image_writer()
+                finalize_dataset(dataset)
                 completed = True
                 emit({
                     "type": "episode_saved",
@@ -166,8 +188,7 @@ def main() -> None:
 
             elif message_type == "cancel":
                 if dataset is not None:
-                    dataset.clear_episode_buffer(delete_images=True)
-                    dataset.stop_image_writer()
+                    cancel_dataset(dataset)
                     dataset = None
                 emit({"type": "recording_cancelled"})
                 return
@@ -177,8 +198,7 @@ def main() -> None:
     finally:
         if dataset is not None and not completed:
             try:
-                dataset.clear_episode_buffer(delete_images=True)
-                dataset.stop_image_writer()
+                cancel_dataset(dataset)
             except Exception as cleanup_error:
                 print(f"清理未保存 episode 失败: {cleanup_error}", file=sys.stderr, flush=True)
 

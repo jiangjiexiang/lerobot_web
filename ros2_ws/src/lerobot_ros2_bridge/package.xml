@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>lerobot_ros2_bridge</name>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
   <description>ROS 2 topic adapter for LeRobot Web and LeRobot-based SO-101 hardware.</description>
   <maintainer email="maintainer@example.com">LeRobot Web Maintainer</maintainer>
   <license>Apache-2.0</license>
@@ -9,6 +9,7 @@
   <exec_depend>rclpy</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>message_filters</exec_depend>
   <exec_depend>trajectory_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>ros2launch</exec_depend>

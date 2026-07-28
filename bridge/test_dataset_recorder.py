@@ -40,37 +40,61 @@ class DatasetRecorderTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix="lerobot-recorder-test-") as directory:
             root = Path(directory) / "demo"
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(__file__).with_name("dataset_recorder.py")),
-                    "--root",
-                    str(root),
-                    "--repo-id",
-                    "local/demo",
-                    "--fps",
-                    "10",
-                    "--task",
-                    "synthetic",
-                    "--robot-type",
-                    "ros2_test",
-                ],
-                input=stdin,
-                text=True,
-                capture_output=True,
-                timeout=90,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            events = [json.loads(line) for line in result.stdout.splitlines()]
-            self.assertIn("episode_saved", [event["type"] for event in events])
+            recorder_command = [
+                sys.executable,
+                str(Path(__file__).with_name("dataset_recorder.py")),
+                "--root",
+                str(root),
+                "--repo-id",
+                "local/demo",
+                "--fps",
+                "10",
+                "--task",
+                "synthetic",
+                "--robot-type",
+                "ros2_test",
+            ]
+            for expected_episode in (0, 1):
+                result = subprocess.run(
+                    recorder_command,
+                    input=stdin,
+                    text=True,
+                    capture_output=True,
+                    timeout=90,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                events = [json.loads(line) for line in result.stdout.splitlines()]
+                saved = next(event for event in events if event["type"] == "episode_saved")
+                self.assertEqual(saved["episode"], expected_episode)
 
             dataset = LeRobotDataset("local/demo", root=root)
-            self.assertEqual(dataset.num_episodes, 1)
-            self.assertEqual(dataset.num_frames, 1)
+            self.assertEqual(dataset.num_episodes, 2)
+            self.assertEqual(dataset.num_frames, 2)
             self.assertEqual(dataset.fps, 10)
             self.assertEqual(dataset.features["observation.state"]["names"], list(joints))
-            self.assertEqual(len(list((root / "videos").glob("**/*.mp4"))), 2)
+            self.assertEqual(len(list((root / "videos").glob("**/*.mp4"))), 4)
+
+            catalog_script = str(Path(__file__).with_name("dataset_catalog.py"))
+            for command in ("list", "detail", "quality"):
+                args = [sys.executable, catalog_script, command, "--root", directory]
+                if command != "list":
+                    args.extend(["--dataset", "demo"])
+                catalog = subprocess.run(
+                    args,
+                    text=True,
+                    capture_output=True,
+                    timeout=90,
+                    check=False,
+                )
+                self.assertEqual(catalog.returncode, 0, catalog.stdout + catalog.stderr)
+                payload = json.loads(catalog.stdout)
+                if command == "list":
+                    self.assertEqual(payload["datasets"][0]["totalEpisodes"], 2)
+                else:
+                    self.assertEqual(len(payload["episodes"]), 2)
+                if command == "quality":
+                    self.assertEqual(payload["summary"]["errors"], 0)
 
 
 if __name__ == "__main__":
