@@ -8,7 +8,9 @@
       <span>控制 {{ metrics.controlFps }} FPS / {{ formatLatency(metrics.controlLatency) }}</span>
       <span>视频1 {{ metrics.cameraFps }} FPS / {{ formatLatency(metrics.cameraLatency) }} / 丢{{ metrics.cameraDropped }}</span>
       <span>视频2 {{ metrics.camera2Fps }} FPS / {{ formatLatency(metrics.camera2Latency) }} / 丢{{ metrics.camera2Dropped }}</span>
-      <span :class="metrics.streamConnected ? 'ok' : 'bad'">视频WS {{ metrics.streamConnected ? '正常' : '断开' }}</span>
+      <span :class="metrics.rtcConnected || metrics.streamConnected ? 'ok' : 'bad'">
+        传输 {{ metrics.rtcConnected ? "WebRTC" : metrics.streamConnected ? "WebSocket" : "断开" }}
+      </span>
     </div>
   </div>
 </template>

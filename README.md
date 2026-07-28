@@ -1,19 +1,20 @@
-# LeRobot Web · SO-101 数据与训练平台
+# LeRobot Web · ROS 2 机器人数据与训练平台
 
-面向 SO-101 Leader / Follower 机械臂的本地网页平台，覆盖双摄像头遥操作、LeRobot 数据录制与审核、训练任务、模型评估和受控部署。当前稳定使用方式是 **两只机械臂连接同一台机器人电脑**；MuJoCo 功能已关闭，控制链路不再初始化仿真或生成仿真帧。
+以 ROS 2 为控制边界的本地网页平台，当前通过非侵入适配器支持 SO-101 Leader / Follower，并覆盖双摄像头遥操作、LeRobot 数据录制与审核、训练任务、模型评估和受控部署。项目不修改 LeRobot 源码；LeRobot 只作为 SO-101 硬件依赖运行在独立进程中。
 
 > 要把 Leader 放到另一台 Wi‑Fi 电脑，请先阅读 [双电脑 Wi‑Fi 遥操作设计](docs/WIFI_TWO_COMPUTER_TELEOP.md)。项目中已有 `operator-server` 原型，但它与当前一体化桥接脚本的消息协议尚未完成对接，不能直接用于生产遥操作。
 
 ## 当前架构
 
 ```text
-浏览器 ── HTTP / WebSocket ── robot-server ── stdio ── teleop_mujoco.py
-                                      │                     │
-                                      │                     ├─ /dev/ttyACM0  Follower（从臂）
-                                      │                     ├─ /dev/ttyACM1  Leader（主臂）
-                                      │                     └─ 摄像头采集
+浏览器 ── HTTP / WebSocket ── robot-server ── stdio ── ROS 2 bridge
+                                      │                     ├─ JointState 状态
+                                      │                     ├─ JointTrajectory 命令
+                                      │                     └─ LeRobot adapter ── SO-101 串口
                                       └─ 控制状态 / 独立摄像头推流
 ```
+
+ROS 2 话题、构建方法和其他机械臂接入规范见 [ROS 2 控制架构](docs/ROS2_ARCHITECTURE.md)。WebRTC 视频与控制的可行性、选型和安全设计见 [WebRTC 传输方案](docs/WEBRTC_TRANSPORT_PLAN.md)。
 
 默认映射（请以实际线缆为准）：
 
@@ -24,7 +25,19 @@
 
 ## 快速启动
 
+首次使用先把 LeRobot 以可编辑包安装到独立环境；这只安装环境和入口点，不修改 LeRobot 源码：
+
 ```bash
+/home/jiang/miniconda3/envs/lerobot/bin/python3 -m pip install -e '/home/jiang/lerobot[feetech]'
+```
+
+然后构建 ROS 2 包并启动：
+
+```bash
+cd ~/lerobot_web/ros2_ws
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install
+
 cd ~/lerobot_web
 ./start_robot.sh
 ```
@@ -71,6 +84,7 @@ HTTPS_KEY="$PWD/.certs/lerobot-lan.key" \
 | Robot API | `http://localhost:43127` |
 | 控制 WebSocket | `ws://localhost:43127/ws/control` |
 | 推流 WebSocket | `ws://localhost:43127/ws/stream` |
+| WebRTC signaling | `POST http://localhost:43127/api/rtc/offer` |
 | 健康检查 | `http://localhost:43127/health` |
 
 ## 工作区
@@ -112,7 +126,9 @@ ls /dev/ttyACM* /dev/ttyUSB*
 
 ### 录制 LeRobot 数据集
 
-启动遥操作并确认两路摄像头都有实时画面后，在右侧“数据集录制”中填写数据集名称和任务描述。点击“开始录制”，完成后点击“停止并保存”；数据默认写入 `~/lerobot_datasets/<数据集名称>`，可用 `DATASET_ROOT` 修改根目录。同名数据集会在 FPS 和双摄像头分辨率一致时追加 episode。
+启动遥操作并确认两路摄像头都有实时画面后，在右侧“数据集录制”中填写数据集名称和任务描述。点击“开始录制”，完成后点击“停止并保存”；数据默认写入 `~/lerobot_datasets/<数据集名称>`，可用 `DATASET_ROOT` 修改根目录。同名数据集只会在 FPS、双摄像头分辨率、关节名称及顺序全部一致时追加 episode。外部 ROS2 机械臂的关节 schema 由第一帧 `JointState` 自动建立，不再限制为 SO101 的六个关节。
+
+采集仅接受新鲜且同步的数据：关节状态和两路相机默认不得超过 250 ms，两路相机到达时间差不得超过 100 ms。可用 `RECORDING_MAX_SENSOR_AGE_MS` 和 `RECORDING_MAX_CAMERA_SKEW_MS` 调整。
 
 录制需要当前 Python 环境已安装 LeRobot 及其视频编码依赖。停止遥操作时，正在录制且已有数据帧的 episode 会自动保存；“丢弃”只清理本次尚未保存的 episode。
 
@@ -130,6 +146,7 @@ bridge/                 Python 串口、遥操作与摄像头桥接
   dataset_catalog.py    数据集与 episode 元数据读取器
   models/               MuJoCo 模型与资源
 robot-server/           当前机器人端 API / WebSocket 服务
+ros2_ws/                ROS 2 标准话题与 LeRobot/厂商驱动适配包
 operator-server/        双电脑操作端原型（待完成协议对接）
 frontend/               Vue 3 控制台
 docs/                   部署与设计文档

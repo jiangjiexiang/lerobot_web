@@ -21,9 +21,10 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
 import type { JointData } from "../composables/useWebSocket";
 
-const jointNames: (keyof JointData)[] = [
+const defaultJointNames = [
   "shoulder_pan",
   "shoulder_lift",
   "elbow_flex",
@@ -32,10 +33,18 @@ const jointNames: (keyof JointData)[] = [
   "gripper",
 ];
 
-defineProps<{
+const props = defineProps<{
   leader: JointData | null;
   follower: JointData | null;
 }>();
+
+const jointNames = computed(() => {
+  const names = new Set([
+    ...Object.keys(props.leader || {}),
+    ...Object.keys(props.follower || {}),
+  ]);
+  return names.size > 0 ? [...names] : defaultJointNames;
+});
 
 function formatVal(v: number | undefined): string {
   if (v === undefined || v === null) return "-";

@@ -260,6 +260,11 @@ def main():
     parser.add_argument("--stream-jpeg-quality", type=int, default=82, help="网页 MuJoCo JPEG 质量（1-100）")
     parser.add_argument("--viewer", action="store_true", help="打开 MuJoCo 交互式查看器")
     parser.add_argument("--remote-leader", action="store_true", help="从 stdin 接收网页 Leader 动作")
+    parser.add_argument(
+        "--external-command",
+        action="store_true",
+        help="Follower 只执行 stdin 动作；Leader 仍只读并作为观测输出（供 ROS 2 适配层使用）",
+    )
     parser.add_argument("--command-timeout", type=float, default=0.15, help="远程动作超时秒数")
     parser.add_argument("--camera-index", type=int, default=-1, help="摄像头索引；-1 禁用")
     parser.add_argument("--camera-fps", type=int, default=15, help="摄像头最大帧率")
@@ -282,9 +287,9 @@ def main():
     logger.info("Follower 电机配置完成 (位置模式)")
 
     # === 连接 Leader / 接收远程 Leader ===
-    remote_leader = RemoteLeaderInput() if args.remote_leader else None
+    command_input = RemoteLeaderInput() if args.remote_leader or args.external_command else None
     leader_bus = None
-    if remote_leader:
+    if args.remote_leader:
         leader_has_calib = True
         logger.info(f"远程 Leader 模式：等待网页动作（超时 {args.command_timeout:.2f}s 时保持当前位置）")
     else:
@@ -295,6 +300,8 @@ def main():
         leader_bus.connect()
         leader_bus.disable_torque()
         logger.info(f"Leader 连接成功 (仅读取模式, 标定: {'有' if leader_has_calib else '无'})")
+        if args.external_command:
+            logger.info("外部命令模式：Leader 只发布观测，Follower 仅执行 stdin 命令")
 
     def shutdown_from_signal(signum, _frame):
         """Node 停止子进程时确保从臂不再保持扭矩。"""
@@ -316,6 +323,12 @@ def main():
     # 无标定时用原始编码器值
     use_raw = not (follower_has_calib and leader_has_calib)
     if use_raw:
+        if args.external_command:
+            follower_bus.disable_torque()
+            follower_bus.disconnect(disable_torque=False)
+            if leader_bus is not None:
+                leader_bus.disconnect()
+            parser.error("ROS 2 外部命令模式要求 Leader 和 Follower 标定完整，拒绝使用原始编码器单位")
         logger.warning("无标定文件，使用原始编码器值 (0-4095)，MuJoCo 将按原始值映射弧度")
 
     period = 1.0 / args.fps
@@ -336,9 +349,13 @@ def main():
             print(json.dumps({"type": "camera_frame", "data": base64.b64encode(jpeg).decode("ascii"), "ts": time.time()}), flush=True)
 
     def get_leader_joints() -> dict:
-        if remote_leader:
-            return remote_leader.latest(args.command_timeout) or {}
+        if args.remote_leader:
+            return command_input.latest(args.command_timeout) or {}
         return read_positions(leader_bus, normalize=not use_raw)
+
+    def get_follower_goal(leader_joints: dict) -> dict:
+        source = command_input.latest(args.command_timeout) if args.external_command else leader_joints
+        return {k: v for k, v in (source or {}).items() if k in follower_bus.motors}
 
     # MuJoCo 已永久关闭；保留旧参数仅为兼容已有启动配置。
     if False:
@@ -360,7 +377,7 @@ def main():
                 leader_joints = get_leader_joints()
 
                 # 2. 发送 leader 角度到 follower
-                goal_pos = {k: v for k, v in leader_joints.items() if k in follower_bus.motors}
+                goal_pos = get_follower_goal(leader_joints)
                 if goal_pos:
                     write_positions(follower_bus, goal_pos, normalize=not use_raw)
 
@@ -404,7 +421,7 @@ def main():
                 leader_joints = get_leader_joints()
 
                 # 2. 发送到 follower
-                goal_pos = {k: v for k, v in leader_joints.items() if k in follower_bus.motors}
+                goal_pos = get_follower_goal(leader_joints)
                 if goal_pos:
                     write_positions(follower_bus, goal_pos, normalize=not use_raw)
 

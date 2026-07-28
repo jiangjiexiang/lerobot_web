@@ -5,7 +5,8 @@ type Calibration = Record<string, { id: number; drive_mode: number; range_min: n
 type SerialPortLike = { open(options: { baudRate: number; bufferSize?: number }): Promise<void>; close(): Promise<void>; readable: ReadableStream<Uint8Array> | null; writable: WritableStream<Uint8Array> | null };
 type SerialNavigator = Navigator & { serial?: { requestPort(): Promise<SerialPortLike> } };
 
-const names: (keyof JointData)[] = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"];
+const names = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"] as const;
+type So101JointName = (typeof names)[number];
 
 function packet(id: number, instruction: number, params: number[]) {
   const bytes = [0xff, 0xff, id, params.length + 2, instruction, ...params];
@@ -110,7 +111,7 @@ export function useLeaderSerial(
     }
   }
 
-  function normalize(raw: number, name: keyof JointData, cal: Calibration["shoulder_pan"]): number {
+  function normalize(raw: number, name: So101JointName, cal: Calibration["shoulder_pan"]): number {
     const bounded = Math.max(cal.range_min, Math.min(cal.range_max, raw));
     if (name === "gripper") {
       const percent = ((bounded - cal.range_min) / (cal.range_max - cal.range_min)) * 100;

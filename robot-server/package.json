@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "ts-node src/index.ts",
     "build": "tsc",
+    "test": "npm run build && node test/rtcGateway.integration.js",
     "start": "node dist/index.js"
   },
   "keywords": [],
@@ -13,6 +14,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@roamhq/wrtc": "^0.10.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "ws": "^8.21.1"

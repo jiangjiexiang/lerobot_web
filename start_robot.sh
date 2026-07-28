@@ -5,7 +5,24 @@
 set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-export PYTHON_PATH="${PYTHON_PATH:-/home/nvidia/miniconda3/envs/lerobot/bin/python3}"
+if [ -z "${PYTHON_PATH:-}" ]; then
+    if [ -x "/home/jiang/miniconda3/envs/lerobot/bin/python3" ]; then
+        PYTHON_PATH="/home/jiang/miniconda3/envs/lerobot/bin/python3"
+    elif [ -x "/home/nvidia/miniconda3/envs/lerobot/bin/python3" ]; then
+        PYTHON_PATH="/home/nvidia/miniconda3/envs/lerobot/bin/python3"
+    elif [ -n "${CONDA_PREFIX:-}" ] && [ -x "$CONDA_PREFIX/bin/python3" ]; then
+        PYTHON_PATH="$CONDA_PREFIX/bin/python3"
+    else
+        PYTHON_PATH="$(command -v python3 || true)"
+    fi
+fi
+export PYTHON_PATH
+export LEROBOT_PYTHON_PATH="${LEROBOT_PYTHON_PATH:-$PYTHON_PATH}"
+export CONTROL_BACKEND="${CONTROL_BACKEND:-ros2}"
+export ROS2_DRIVER="${ROS2_DRIVER:-lerobot}"
+export ROS2_COMMAND_SOURCE="${ROS2_COMMAND_SOURCE:-}"
+export ROS_DISTRO="${ROS_DISTRO:-humble}"
+export ROS_PYTHON_PATH="${ROS_PYTHON_PATH:-/usr/bin/python3}"
 export PORT="${PORT:-43127}"
 export ENABLE_CAMERA="${ENABLE_CAMERA:-1}"
 export CAMERA_FPS="${CAMERA_FPS:-30}"
@@ -18,6 +35,11 @@ FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 
 echo "=== 遥操作与数据平台一键启动 ==="
 echo "Python: $PYTHON_PATH"
+if [ "$CONTROL_BACKEND" = "ros2" ]; then
+    echo "控制后端: ros2 / $ROS2_DRIVER${ROS2_COMMAND_SOURCE:+ / $ROS2_COMMAND_SOURCE}"
+else
+    echo "控制后端: legacy"
+fi
 echo "摄像头: 自动检测 USB 摄像头 (MJPG ${CAMERA_WIDTH}x${CAMERA_HEIGHT}@$CAMERA_FPS FPS)"
 
 # 清理上次异常退出后仍占用服务端口的进程。
@@ -61,13 +83,17 @@ else
 fi
 echo ""
 
-# 检查 Python：PYTHON_PATH 既可以是绝对/相对文件路径，也可以是 PATH 中的命令名（如 python3）。
-if [[ "$PYTHON_PATH" == */* ]]; then
+# LeRobot、摄像头或旧后端需要通用 Python；纯 external ROS 2 模式可不依赖 LeRobot 环境。
+NEEDS_APP_PYTHON=0
+if [ "$CONTROL_BACKEND" = "legacy" ] || [ "$ROS2_DRIVER" = "lerobot" ] || [ "$ENABLE_CAMERA" != "0" ]; then
+    NEEDS_APP_PYTHON=1
+fi
+if [ "$NEEDS_APP_PYTHON" -eq 1 ] && [[ "$PYTHON_PATH" == */* ]]; then
     if [ ! -f "$PYTHON_PATH" ] || [ ! -x "$PYTHON_PATH" ]; then
         echo "错误: Python 可执行文件不存在或不可执行: $PYTHON_PATH"
         exit 1
     fi
-else
+elif [ "$NEEDS_APP_PYTHON" -eq 1 ]; then
     if ! command -v "$PYTHON_PATH" >/dev/null 2>&1; then
         echo "错误: PATH 中找不到 Python 命令: $PYTHON_PATH"
         echo "当前 PATH: $PATH"
@@ -75,6 +101,21 @@ else
     fi
     PYTHON_PATH="$(command -v "$PYTHON_PATH")"
     export PYTHON_PATH
+fi
+
+if [ "$ENABLE_CAMERA" != "0" ]; then
+    if ! "$PYTHON_PATH" -c "import cv2, numpy; from lerobot.datasets.lerobot_dataset import LeRobotDataset" >/dev/null 2>&1; then
+        echo "错误: $PYTHON_PATH 缺少摄像头或 LeRobotDataset 采集依赖"
+        echo "请在 LeRobot 环境安装项目与机械臂依赖，例如:"
+        echo "  $PYTHON_PATH -m pip install -e '/home/jiang/lerobot[feetech]'"
+        exit 1
+    fi
+fi
+if [ "$ROS2_DRIVER" = "lerobot" ]; then
+    if ! "$LEROBOT_PYTHON_PATH" -c "import scservo_sdk; from lerobot.motors.feetech import FeetechMotorsBus" >/dev/null 2>&1; then
+        echo "错误: $LEROBOT_PYTHON_PATH 缺少 LeRobot Feetech 电机依赖"
+        exit 1
+    fi
 fi
 
 # 检查 Node.js 版本
@@ -85,6 +126,21 @@ if [ "$NODE_MAJOR" -lt 18 ]; then
     echo "  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -"
     echo "  sudo apt install -y nodejs"
     exit 1
+fi
+
+if [ "$CONTROL_BACKEND" = "ros2" ]; then
+    ROS_SETUP="/opt/ros/$ROS_DISTRO/setup.bash"
+    if [ ! -f "$ROS_SETUP" ]; then
+        echo "错误: 找不到 ROS 2 环境: $ROS_SETUP"
+        exit 1
+    fi
+    # ROS 2 Humble 的 rclpy 必须由它对应的系统 Python 运行；LeRobot 仍由上面的独立环境运行。
+    source "$ROS_SETUP"
+    if ! "$ROS_PYTHON_PATH" -c "import rclpy, sensor_msgs, trajectory_msgs" >/dev/null 2>&1; then
+        echo "错误: $ROS_PYTHON_PATH 无法导入 ROS 2 Python 包"
+        echo "请确认 ROS_DISTRO=$ROS_DISTRO 与 ROS_PYTHON_PATH 匹配"
+        exit 1
+    fi
 fi
 
 # 安装依赖
@@ -121,7 +177,7 @@ trap cleanup EXIT INT TERM
 # 等待后端就绪
 echo -n "      等待后端就绪"
 for i in $(seq 1 20); do
-    if curl -s "http://localhost:$PORT/health" > /dev/null 2>&1; then
+    if curl --noproxy "*" -s "http://localhost:$PORT/health" > /dev/null 2>&1; then
         echo " OK"
         break
     fi

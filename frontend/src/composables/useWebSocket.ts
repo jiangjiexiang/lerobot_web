@@ -1,13 +1,8 @@
 import { ref, onMounted, onUnmounted } from "vue";
 
-export interface JointData {
-  shoulder_pan: number;
-  shoulder_lift: number;
-  elbow_flex: number;
-  wrist_flex: number;
-  wrist_roll: number;
-  gripper: number;
-}
+// ROS 2 drivers may expose different joint sets. The SO-101 Web Serial adapter
+// still emits its six canonical names, while the status UI accepts any driver.
+export type JointData = Record<string, number>;
 
 export interface WSMessage {
   type: string;
@@ -30,6 +25,7 @@ export interface DebugMetrics {
   camera2Latency: number | null;
   camera2Dropped: number;
   streamConnected: boolean;
+  rtcConnected: boolean;
 }
 
 export interface RecordingStatus {
@@ -64,13 +60,22 @@ export function useWebSocket() {
     controlFps: 0, controlLatency: null,
     cameraFps: 0, cameraLatency: null, cameraDropped: 0,
     camera2Fps: 0, camera2Latency: null, camera2Dropped: 0,
-    streamConnected: false,
+    streamConnected: false, rtcConnected: false,
   });
 
   let ws: WebSocket | null = null;
   let streamWs: WebSocket | null = null;
+  let rtcPeer: RTCPeerConnection | null = null;
+  let rtcControl: RTCDataChannel | null = null;
+  let rtcState: RTCDataChannel | null = null;
+  let rtcVideo: RTCDataChannel | null = null;
+  let rtcSafety: RTCDataChannel | null = null;
+  let rtcStateOpen = false;
+  let rtcVideoOpen = false;
+  let rtcSequence = 0;
   let reconnectTimer: number | null = null;
   let streamReconnectTimer: number | null = null;
+  let rtcReconnectTimer: number | null = null;
   let frameAnimation: number | null = null;
   let pendingCameraFrame: Blob | null = null;
   let pendingCamera2Frame: Blob | null = null;
@@ -86,6 +91,7 @@ export function useWebSocket() {
   let camera2Dropped = 0;
   let disposed = false;
   let pingTimer: number | null = null;
+  let rtcHeartbeatTimer: number | null = null;
   // 机器人上位机时钟与浏览器时钟不同步（无 NTP），直接用两台设备的时间戳相减会得到
   // 无意义甚至负数的延迟，被 Math.max(0, ...) 钳制后就一直显示 0ms。
   // 用控制 WebSocket 做一次简易 NTP 式估算：clockOffset = 机器人时钟 - 浏览器时钟。
@@ -204,6 +210,7 @@ export function useWebSocket() {
     ws.onmessage = (ev) => {
       try {
         const msg: WSMessage = JSON.parse(ev.data);
+        if (rtcStateOpen && msg.type === "teleop_observation") return;
         handleMessage(msg);
       } catch {
         // 忽略非 JSON
@@ -227,13 +234,112 @@ export function useWebSocket() {
     streamWs.onclose = () => {
       metrics.value = { ...metrics.value, streamConnected: false };
       streamWs = null;
-      if (!disposed && streamReconnectTimer === null) {
+      if (!disposed && !rtcVideoOpen && streamReconnectTimer === null) {
         streamReconnectTimer = window.setTimeout(() => {
           streamReconnectTimer = null;
           connectStream();
         }, 3000);
       }
     };
+  }
+
+  function waitForIceGathering(peer: RTCPeerConnection): Promise<void> {
+    if (peer.iceGatheringState === "complete") return Promise.resolve();
+    return new Promise((resolve) => {
+      const timeout = window.setTimeout(resolve, 5000);
+      const listener = () => {
+        if (peer.iceGatheringState === "complete") {
+          clearTimeout(timeout);
+          peer.removeEventListener("icegatheringstatechange", listener);
+          resolve();
+        }
+      };
+      peer.addEventListener("icegatheringstatechange", listener);
+    });
+  }
+
+  function scheduleRtcReconnect() {
+    if (disposed || rtcReconnectTimer !== null) return;
+    rtcReconnectTimer = window.setTimeout(() => {
+      rtcReconnectTimer = null;
+      void connectRtc();
+    }, 3000);
+  }
+
+  function closeRtc(scheduleReconnect = false) {
+    rtcStateOpen = false;
+    const hadVideo = rtcVideoOpen;
+    rtcVideoOpen = false;
+    metrics.value = { ...metrics.value, rtcConnected: false };
+    rtcControl = rtcState = rtcVideo = rtcSafety = null;
+    const peer = rtcPeer;
+    rtcPeer = null;
+    peer?.close();
+    if (hadVideo && !disposed) connectStream();
+    if (scheduleReconnect) scheduleRtcReconnect();
+  }
+
+  async function connectRtc() {
+    if (disposed || rtcPeer) return;
+    try {
+      const configResponse = await fetch("/api/rtc/config");
+      const config = await configResponse.json();
+      if (!configResponse.ok || !config.enabled) return;
+      const peer = new RTCPeerConnection({ iceServers: config.iceServers || [] });
+      rtcPeer = peer;
+      rtcControl = peer.createDataChannel("robot-control-v1", { ordered: false, maxRetransmits: 0 });
+      rtcState = peer.createDataChannel("robot-state-v1", { ordered: true });
+      rtcVideo = peer.createDataChannel("robot-video-v1", { ordered: false, maxRetransmits: 0 });
+      rtcSafety = peer.createDataChannel("robot-safety-v1", { ordered: true });
+      rtcVideo.binaryType = "arraybuffer";
+
+      rtcState.onopen = () => {
+        rtcStateOpen = true;
+        metrics.value = { ...metrics.value, rtcConnected: true };
+        log("WebRTC 状态通道已连接");
+      };
+      rtcState.onclose = () => { rtcStateOpen = false; };
+      rtcState.onmessage = (event) => {
+        try { handleMessage(JSON.parse(String(event.data))); } catch { /* ignore malformed state */ }
+      };
+      rtcVideo.onopen = () => {
+        rtcVideoOpen = true;
+        if (streamReconnectTimer) { clearTimeout(streamReconnectTimer); streamReconnectTimer = null; }
+        streamWs?.close();
+      };
+      rtcVideo.onclose = () => {
+        const wasOpen = rtcVideoOpen;
+        rtcVideoOpen = false;
+        if (wasOpen && !disposed) connectStream();
+      };
+      rtcVideo.onmessage = (event) => {
+        if (event.data instanceof ArrayBuffer) {
+          handleBinaryFrame(event.data);
+        } else if (event.data instanceof Blob) {
+          void event.data.arrayBuffer().then(handleBinaryFrame);
+        }
+      };
+      peer.onconnectionstatechange = () => {
+        if (["failed", "closed", "disconnected"].includes(peer.connectionState)) {
+          closeRtc(!disposed);
+        }
+      };
+
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      await waitForIceGathering(peer);
+      const response = await fetch("/api/rtc/offer", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(peer.localDescription),
+      });
+      const answer = await response.json();
+      if (!response.ok) throw new Error(answer.error || "WebRTC signaling 失败");
+      await peer.setRemoteDescription(answer);
+    } catch (cause) {
+      log(`WebRTC 不可用，继续使用 WebSocket: ${cause instanceof Error ? cause.message : String(cause)}`);
+      closeRtc(!disposed);
+    }
   }
 
   function handleMessage(msg: WSMessage) {
@@ -279,6 +385,14 @@ export function useWebSocket() {
   }
 
   function send(msg: object) {
+    if (
+      (msg as WSMessage).type === "action"
+      && rtcControl?.readyState === "open"
+      && rtcControl.bufferedAmount < 64 * 1024
+    ) {
+      rtcControl.send(JSON.stringify({ ...msg, seq: ++rtcSequence, sent_at_ms: Date.now() }));
+      return;
+    }
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(msg));
     }
@@ -287,19 +401,28 @@ export function useWebSocket() {
   onMounted(() => {
     connect();
     connectStream();
+    void connectRtc();
     metricsTimer = window.setInterval(updateMetrics, 1000);
     // 定期重新估算时钟偏差，避免长时间运行后（时钟漂移、网络路径变化）产生的误差累积。
     pingTimer = window.setInterval(sendPing, 5000);
+    rtcHeartbeatTimer = window.setInterval(() => {
+      if (rtcSafety?.readyState === "open") {
+        rtcSafety.send(JSON.stringify({ type: "heartbeat", ts_ms: Date.now() }));
+      }
+    }, 250);
   });
   onUnmounted(() => {
     disposed = true;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     if (streamReconnectTimer) clearTimeout(streamReconnectTimer);
+    if (rtcReconnectTimer) clearTimeout(rtcReconnectTimer);
     if (frameAnimation !== null) cancelAnimationFrame(frameAnimation);
     if (metricsTimer !== null) clearInterval(metricsTimer);
     if (pingTimer !== null) clearInterval(pingTimer);
+    if (rtcHeartbeatTimer !== null) clearInterval(rtcHeartbeatTimer);
     if (ws) ws.close();
     if (streamWs) streamWs.close();
+    closeRtc(false);
     if (cameraFrameUrl) URL.revokeObjectURL(cameraFrameUrl);
     if (camera2FrameUrl) URL.revokeObjectURL(camera2FrameUrl);
   });

@@ -9,22 +9,43 @@ import crypto from "crypto";
 import { execSync, execFile, spawn, ChildProcess } from "child_process";
 import { RobotBridge, BridgeMessage } from "./robotBridge";
 import { MJPEGStreamManager } from "./streams";
+import { RtcGateway } from "./rtcGateway";
 
 // 配置
 const PORT = parseInt(process.env.PORT || "43127");
 const BRIDGE_DIR = process.env.BRIDGE_DIR || path.join(__dirname, "../../bridge");
-const TELEOP_SCRIPT = path.join(BRIDGE_DIR, "teleop_mujoco.py");
+const CONTROL_BACKEND = process.env.CONTROL_BACKEND || "ros2";
+const ROS2_DRIVER = process.env.ROS2_DRIVER || "lerobot";
+const CONFIGURED_COMMAND_SOURCE = process.env.ROS2_COMMAND_SOURCE || "";
+const LEGACY_TELEOP_SCRIPT = path.join(BRIDGE_DIR, "teleop_mujoco.py");
+const ROS2_BRIDGE_SCRIPT = process.env.ROS2_BRIDGE_SCRIPT
+  || path.join(__dirname, "../../ros2_ws/src/lerobot_ros2_bridge/lerobot_ros2_bridge/web_bridge.py");
+const TELEOP_SCRIPT = CONTROL_BACKEND === "legacy" ? LEGACY_TELEOP_SCRIPT : ROS2_BRIDGE_SCRIPT;
 const CAMERA_SCRIPT = path.join(BRIDGE_DIR, "camera_stream.py");
 const RECORDER_SCRIPT = path.join(BRIDGE_DIR, "dataset_recorder.py");
 const DATASET_CATALOG_SCRIPT = path.join(BRIDGE_DIR, "dataset_catalog.py");
 const PYTHON_PATH = process.env.PYTHON_PATH || "python3";
+const CONTROL_PYTHON_PATH = CONTROL_BACKEND === "legacy"
+  ? PYTHON_PATH
+  : process.env.ROS_PYTHON_PATH || "/usr/bin/python3";
 const FRONTEND_DIST = path.join(__dirname, "../../frontend/dist");
 const DATASET_ROOT = path.resolve(process.env.DATASET_ROOT || path.join(process.env.HOME || "/tmp", "lerobot_datasets"));
 const ENABLE_CAMERA = process.env.ENABLE_CAMERA !== "0" && process.env.ENABLE_CAMERA !== "false";
 const CAMERA_FPS = parseInt(process.env.CAMERA_FPS || "30", 10);
 const CAMERA_WIDTH = parseInt(process.env.CAMERA_WIDTH || "640", 10);
 const CAMERA_HEIGHT = parseInt(process.env.CAMERA_HEIGHT || "360", 10);
+const RECORDING_MAX_SENSOR_AGE_MS = parseInt(process.env.RECORDING_MAX_SENSOR_AGE_MS || "250", 10);
+const RECORDING_MAX_CAMERA_SKEW_MS = parseInt(process.env.RECORDING_MAX_CAMERA_SKEW_MS || "100", 10);
 const DEFAULT_STREAM_FPS = parseInt(process.env.STREAM_FPS || "0", 10);
+const ENABLE_WEBRTC = process.env.ENABLE_WEBRTC !== "0" && process.env.ENABLE_WEBRTC !== "false";
+const RTC_ICE_SERVERS = [
+  ...(process.env.RTC_STUN_URL ? [{ urls: process.env.RTC_STUN_URL }] : []),
+  ...(process.env.RTC_TURN_URL ? [{
+    urls: process.env.RTC_TURN_URL,
+    username: process.env.RTC_TURN_USERNAME,
+    credential: process.env.RTC_TURN_CREDENTIAL,
+  }] : []),
+];
 const TRAINING_ROOT = path.join(DATASET_ROOT, ".lerobot-web", "training");
 
 function detectUsbCameraIndices(): number[] {
@@ -81,7 +102,9 @@ const streamManager = new MJPEGStreamManager();
 let bridge: RobotBridge | null = null;
 let stopping = false;
 let remoteLeaderActive = false;
+let activeCommandSource: "leader" | "web" | "ros" | null = null;
 let latestObservation: BridgeMessage | null = null;
+let latestObservationAt = 0;
 const clients = new Set<WebSocket>();
 const streamClients = new Set<WebSocket>();
 let controlDisconnectTimer: NodeJS.Timeout | null = null;
@@ -94,6 +117,22 @@ function stopTeleop(): boolean {
   broadcastControl({ type: "status", running: false });
   return true;
 }
+
+const rtcGateway = new RtcGateway({
+  enabled: ENABLE_WEBRTC,
+  iceServers: RTC_ICE_SERVERS,
+  onControl: (message) => {
+    if (bridge?.isRunning() && remoteLeaderActive && !stopping) {
+      bridge.send(message as BridgeMessage);
+    }
+  },
+  onSafetyStop: () => { stopTeleop(); },
+  onControlLost: () => {
+    if (remoteLeaderActive && stopTeleop()) {
+      console.warn("[WebRTC] 控制 DataChannel 超时或断开，已停止遥操作");
+    }
+  },
+});
 
 // 摄像头是可选资源：默认关闭，避免服务启动时常驻 OpenCV 进程并占用 USB 摄像头。
 let cameraBridge: RobotBridge | null = null;
@@ -1171,7 +1210,11 @@ function recordObservation(message: BridgeMessage): void {
   if (recordingStatus.state !== "recording" || !recorder?.isRunning() || recorderFramePending) return;
   const now = Date.now();
   if (now < nextRecorderFrameAt || !latestCameraFrame || !latestCamera2Frame) return;
-  if (now - cameraLastFrameAt > 1500 || now - camera2LastFrameAt > 1500) return;
+  if (
+    now - cameraLastFrameAt > RECORDING_MAX_SENSOR_AGE_MS
+    || now - camera2LastFrameAt > RECORDING_MAX_SENSOR_AGE_MS
+    || Math.abs(cameraLastFrameAt - camera2LastFrameAt) > RECORDING_MAX_CAMERA_SKEW_MS
+  ) return;
   if (!message.leader || !message.follower) return;
 
   recorderFramePending = true;
@@ -1934,7 +1977,17 @@ app.post("/api/recording/start", (req, res) => {
     return;
   }
   const now = Date.now();
-  if (!latestCameraFrame || !latestCamera2Frame || now - cameraLastFrameAt > 1500 || now - camera2LastFrameAt > 1500) {
+  if (!latestObservation || now - latestObservationAt > RECORDING_MAX_SENSOR_AGE_MS) {
+    res.status(409).json({ ok: false, error: "没有收到实时 ROS2 关节状态和动作，无法开始录制" });
+    return;
+  }
+  if (
+    !latestCameraFrame
+    || !latestCamera2Frame
+    || now - cameraLastFrameAt > RECORDING_MAX_SENSOR_AGE_MS
+    || now - camera2LastFrameAt > RECORDING_MAX_SENSOR_AGE_MS
+    || Math.abs(cameraLastFrameAt - camera2LastFrameAt) > RECORDING_MAX_CAMERA_SKEW_MS
+  ) {
     res.status(409).json({ ok: false, error: "录制需要两路实时摄像头画面" });
     return;
   }
@@ -1949,6 +2002,7 @@ app.post("/api/recording/start", (req, res) => {
     "--repo-id", `local/${dataset}`,
     "--fps", String(fps),
     "--task", task,
+    "--robot-type", ROS2_DRIVER === "lerobot" ? "so101_follower" : "ros2_external",
   ], PYTHON_PATH);
   recorder = startedRecorder;
   recorderFramePending = false;
@@ -2173,20 +2227,31 @@ app.post("/api/start", (req, res) => {
     camera_index = -1,
     camera_fps = 15,
   } = req.body;
+  const commandSource = (
+    CONTROL_BACKEND === "ros2"
+      ? CONFIGURED_COMMAND_SOURCE || (remote_leader ? "web" : "leader")
+      : remote_leader ? "web" : "leader"
+  ) as "leader" | "web" | "ros";
+  if (!["leader", "web", "ros"].includes(commandSource)) {
+    res.status(500).json({ ok: false, error: `ROS2_COMMAND_SOURCE 无效: ${commandSource}` });
+    return;
+  }
+  const requiresFollowerSerial = CONTROL_BACKEND === "legacy" || (CONTROL_BACKEND === "ros2" && ROS2_DRIVER === "lerobot");
+  const requiresLeaderSerial = requiresFollowerSerial && commandSource === "leader";
 
-  if (typeof follower_port !== "string" || !follower_port.startsWith("/dev/tty")) {
+  if (requiresFollowerSerial && (typeof follower_port !== "string" || !follower_port.startsWith("/dev/tty"))) {
     res.status(400).json({ ok: false, error: "Follower 串口无效" });
     return;
   }
-  if (typeof follower_id !== "string" || !/^[A-Za-z0-9_-]+$/.test(follower_id)) {
+  if (requiresFollowerSerial && (typeof follower_id !== "string" || !/^[A-Za-z0-9_-]+$/.test(follower_id))) {
     res.status(400).json({ ok: false, error: "Follower ID 无效" });
     return;
   }
-  if (!remote_leader && (typeof leader_port !== "string" || !leader_port.startsWith("/dev/tty"))) {
+  if (requiresLeaderSerial && (typeof leader_port !== "string" || !leader_port.startsWith("/dev/tty"))) {
     res.status(400).json({ ok: false, error: "Leader 串口无效" });
     return;
   }
-  if (!remote_leader && (typeof leader_id !== "string" || !/^[A-Za-z0-9_-]+$/.test(leader_id))) {
+  if (requiresLeaderSerial && (typeof leader_id !== "string" || !/^[A-Za-z0-9_-]+$/.test(leader_id))) {
     res.status(400).json({ ok: false, error: "Leader ID 无效" });
     return;
   }
@@ -2207,21 +2272,28 @@ app.post("/api/start", (req, res) => {
     "--fps", String(fps),
     "--stream-fps", String(stream_fps),
   ];
+  if (CONTROL_BACKEND === "ros2") {
+    args.unshift("--driver", ROS2_DRIVER);
+    args.push("--command-source", commandSource);
+  }
   if (viewer) args.push("--viewer");
   if (remote_leader) args.push("--remote-leader");
 
-  console.log(`[Server] 启动遥操作: ${PYTHON_PATH} ${TELEOP_SCRIPT} ${args.join(" ")}`);
+  console.log(`[Server] 启动 ${CONTROL_BACKEND} 控制桥: ${CONTROL_PYTHON_PATH} ${TELEOP_SCRIPT} ${args.join(" ")}`);
 
-  const startedBridge = new RobotBridge(TELEOP_SCRIPT, args, PYTHON_PATH);
+  const startedBridge = new RobotBridge(TELEOP_SCRIPT, args, CONTROL_PYTHON_PATH);
   bridge = startedBridge;
   stopping = false;
-  remoteLeaderActive = Boolean(remote_leader);
+  activeCommandSource = commandSource;
+  remoteLeaderActive = commandSource === "web";
   latestObservation = null;
+  latestObservationAt = 0;
 
   startedBridge.on("message", (msg: BridgeMessage) => {
     switch (msg.type) {
       case "teleop_observation":
         latestObservation = msg;
+        latestObservationAt = Date.now();
         recordObservation(msg);
         broadcastControl(msg);
         break;
@@ -2248,6 +2320,7 @@ app.post("/api/start", (req, res) => {
       bridge = null;
       stopping = false;
       remoteLeaderActive = false;
+      activeCommandSource = null;
       // 非用户主动停止且带非零退出码，说明 Python 侧崩溃；把报错原因推给前端弹窗提示。
       const crashError = !wasRequested && code !== 0 ? errorLine || `进程异常退出 (code=${code})` : null;
       broadcastControl({ type: "stopped", error: crashError });
@@ -2277,7 +2350,41 @@ app.get("/api/status", (req, res) => {
   res.json({
     running: bridge ? bridge.isRunning() && !stopping : false,
     clients: clients.size,
+    controlBackend: CONTROL_BACKEND,
+    rosDriver: CONTROL_BACKEND === "ros2" ? ROS2_DRIVER : null,
+    commandSource: CONTROL_BACKEND === "ros2" ? activeCommandSource || CONFIGURED_COMMAND_SOURCE || null : null,
+    rtc: { enabled: rtcGateway.isEnabled(), peers: rtcGateway.peerCount() },
+    rosTopics: CONTROL_BACKEND === "ros2" ? {
+      leaderState: "/leader/joint_states",
+      followerState: "/follower/joint_states",
+      command: "/follower/joint_trajectory_controller/joint_trajectory",
+    } : null,
   });
+});
+
+app.get("/api/rtc/config", (_req, res) => {
+  res.json({
+    enabled: rtcGateway.isEnabled(),
+    iceServers: RTC_ICE_SERVERS,
+    channels: {
+      control: "robot-control-v1",
+      state: "robot-state-v1",
+      video: "robot-video-v1",
+      safety: "robot-safety-v1",
+    },
+  });
+});
+
+app.post("/api/rtc/offer", async (req, res) => {
+  try {
+    const answer = await rtcGateway.acceptOffer(req.body);
+    res.json(answer);
+  } catch (error) {
+    res.status(rtcGateway.isEnabled() ? 400 : 503).json({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 });
 
 // 切换摄像头
@@ -2384,11 +2491,11 @@ controlWss.on("connection", (ws) => {
   ws.on("close", () => {
     console.log("[Server] 控制客户端断开");
     clients.delete(ws);
-    if (remoteLeaderActive && clients.size === 0 && !controlDisconnectTimer) {
+    if (remoteLeaderActive && clients.size === 0 && rtcGateway.peerCount() === 0 && !controlDisconnectTimer) {
       // 页面刷新和 Wi-Fi 瞬断会很快重连；给短暂宽限期，持续断开才安全停机。
       controlDisconnectTimer = setTimeout(() => {
         controlDisconnectTimer = null;
-        if (remoteLeaderActive && clients.size === 0 && stopTeleop()) {
+        if (remoteLeaderActive && clients.size === 0 && rtcGateway.peerCount() === 0 && stopTeleop()) {
           console.warn("[Server] 远程 Leader 控制连接持续断开，已自动停止遥操作");
         }
       }, 3000);
@@ -2405,6 +2512,7 @@ streamWss.on("connection", (ws) => {
 
 function broadcastControl(msg: BridgeMessage | object): void {
   const data = JSON.stringify(msg);
+  rtcGateway.broadcastControl(msg);
   for (const client of clients) {
     if (client.readyState === WebSocket.OPEN) {
       client.send(data);
@@ -2422,6 +2530,7 @@ function broadcastBinaryFrame(streamType: number, ts: number, jpeg: Buffer): voi
   header.writeUInt8(streamType, 0);
   header.writeDoubleLE(ts, 1);
   const frame = Buffer.concat([header, jpeg]);
+  rtcGateway.broadcastFrame(frame);
   for (const client of streamClients) {
     if (client.readyState === WebSocket.OPEN) {
       // 推流只保留最新帧；慢客户端直接丢弃，绝不形成积压。
@@ -2448,6 +2557,7 @@ function shutdown(): void {
   shuttingDown = true;
   console.log("[Robot Server] 退出中...");
   if (bridge) bridge.stop();
+  void rtcGateway.close();
   if (cameraBridge) cameraBridge.stop();
   if (cameraBridge2) cameraBridge2.stop();
   if (recorder) recorder.stop();
