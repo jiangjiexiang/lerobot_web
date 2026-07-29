@@ -8,17 +8,19 @@
       <span class="live" :class="{ active: hasImage }"><i></i>{{ hasImage ? liveText : waitText }}</span>
     </div>
     <div class="video-box">
-      <img v-if="frame || fallbackSrc" :src="frame || fallbackSrc" :alt="title" @load="fallbackLoaded = true" @error="fallbackLoaded = false" />
+      <video v-if="stream" ref="videoElement" autoplay muted playsinline @playing="videoPlaying = true" @emptied="videoPlaying = false"></video>
+      <img v-else-if="frame || fallbackSrc" :src="frame || fallbackSrc" :alt="title" @load="fallbackLoaded = true" @error="fallbackLoaded = false" />
       <span v-else class="placeholder">{{ placeholder }}<small>{{ hint }}</small></span>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 
 const props = withDefaults(defineProps<{
   frame: string | null;
+  stream?: MediaStream | null;
   fallbackSrc?: string;
   kicker?: string;
   title?: string;
@@ -36,7 +38,22 @@ const props = withDefaults(defineProps<{
 });
 
 const fallbackLoaded = ref(false);
-const hasImage = computed(() => Boolean(props.frame) || fallbackLoaded.value);
+const videoElement = ref<HTMLVideoElement | null>(null);
+const videoPlaying = ref(false);
+const hasImage = computed(() => videoPlaying.value || Boolean(props.frame) || fallbackLoaded.value);
+
+watch(() => props.stream, async (stream) => {
+  videoPlaying.value = false;
+  await nextTick();
+  if (videoElement.value) {
+    videoElement.value.srcObject = stream || null;
+    if (stream) void videoElement.value.play().catch(() => undefined);
+  }
+}, { immediate: true });
+
+onUnmounted(() => {
+  if (videoElement.value) videoElement.value.srcObject = null;
+});
 </script>
 
 <style scoped>
@@ -61,7 +78,7 @@ h2 { font-size: 18px; margin-top: 3px; letter-spacing: -0.25px; }
   aspect-ratio: 16 / 9;
   position: relative;
 }
-.video-box img {
+.video-box img, .video-box video {
   width: 100%;
   height: 100%;
   object-fit: contain;

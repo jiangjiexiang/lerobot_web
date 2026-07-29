@@ -1,5 +1,15 @@
 import crypto from "crypto";
-import { RTCPeerConnection, RTCDataChannel } from "@roamhq/wrtc";
+import fs from "fs";
+import path from "path";
+import { Worker } from "worker_threads";
+import {
+  MediaStream,
+  MediaStreamTrack,
+  RTCPeerConnection,
+  RTCDataChannel,
+  RTCRtpTransceiver,
+  nonstandard,
+} from "@roamhq/wrtc";
 
 interface IceServer {
   urls: string;
@@ -16,6 +26,13 @@ interface RtcPeer {
   closed: boolean;
 }
 
+type CameraIndex = 1 | 2;
+
+interface VideoTrackDescription {
+  camera1: string;
+  camera2: string;
+}
+
 export interface RtcGatewayOptions {
   enabled: boolean;
   iceServers?: IceServer[];
@@ -26,11 +43,7 @@ export interface RtcGatewayOptions {
 }
 
 /**
- * WebRTC transport for low-latency control/state/JPEG delivery.
- *
- * Media remains transport-independent: the binary video channel carries the
- * same latest-frame-only payload as the WebSocket fallback. A future RTP/H264
- * gateway can replace that channel without touching the ROS control boundary.
+ * WebRTC transport for low-latency control, state and RTP video delivery.
  */
 export class RtcGateway {
   private readonly peers = new Map<string, RtcPeer>();
@@ -42,6 +55,11 @@ export class RtcGateway {
   private readonly onControlLost: RtcGatewayOptions["onControlLost"];
   private controlOwner: string | null = null;
   private watchdog: NodeJS.Timeout;
+  private readonly videoSources = new Map<CameraIndex, nonstandard.RTCVideoSource>();
+  private readonly videoTracks = new Map<CameraIndex, MediaStreamTrack>();
+  private readonly videoDecoder: Worker | null;
+  private readonly decoding = new Set<CameraIndex>();
+  private readonly pendingFrames = new Map<CameraIndex, Buffer>();
 
   constructor(options: RtcGatewayOptions) {
     this.enabled = options.enabled;
@@ -50,6 +68,38 @@ export class RtcGateway {
     this.onControl = options.onControl;
     this.onSafetyStop = options.onSafetyStop;
     this.onControlLost = options.onControlLost;
+    if (this.enabled) {
+      for (const camera of [1, 2] as const) {
+        const source = new nonstandard.RTCVideoSource();
+        this.videoSources.set(camera, source);
+        this.videoTracks.set(camera, source.createTrack());
+      }
+    }
+    const compiledDecoder = path.join(__dirname, "videoFrameDecoder.js");
+    const decoderPath = fs.existsSync(compiledDecoder) ? compiledDecoder : path.join(__dirname, "videoFrameDecoder.ts");
+    this.videoDecoder = this.enabled
+      ? new Worker(decoderPath, fs.existsSync(compiledDecoder) ? undefined : { execArgv: ["-r", "ts-node/register"] })
+      : null;
+    this.videoDecoder?.on("message", (frame: { camera: CameraIndex; width?: number; height?: number; data?: Uint8Array }) => {
+      this.decoding.delete(frame.camera);
+      if (frame.width && frame.height && frame.data) {
+        this.videoSources.get(frame.camera)?.onFrame({
+          width: frame.width,
+          height: frame.height,
+          data: frame.data,
+        });
+      }
+      const pending = this.pendingFrames.get(frame.camera);
+      if (pending) {
+        this.pendingFrames.delete(frame.camera);
+        this.decodeVideoFrame(frame.camera, pending);
+      }
+    });
+    this.videoDecoder?.on("error", () => {
+      this.decoding.clear();
+      this.pendingFrames.clear();
+    });
+    this.videoDecoder?.unref();
     this.watchdog = setInterval(() => this.checkWatchdog(), 100);
     this.watchdog.unref();
   }
@@ -62,7 +112,7 @@ export class RtcGateway {
     return this.peers.size;
   }
 
-  async acceptOffer(offer: { type: "offer"; sdp: string }): Promise<{ type: "answer"; sdp: string }> {
+  async acceptOffer(offer: { type: "offer"; sdp: string }): Promise<{ type: "answer"; sdp: string; videoMids: VideoTrackDescription }> {
     if (!this.enabled) throw new Error("WebRTC 未启用");
     if (offer?.type !== "offer" || typeof offer.sdp !== "string" || offer.sdp.length > 1_000_000) {
       throw new Error("无效的 WebRTC offer");
@@ -87,13 +137,14 @@ export class RtcGateway {
 
     try {
       await peer.pc.setRemoteDescription(offer);
+      const videoMids = await this.addVideoTracks(peer.pc);
       const answer = await peer.pc.createAnswer();
       await peer.pc.setLocalDescription(answer);
       await this.waitForIceGathering(peer.pc);
       const local = peer.pc.localDescription;
       if (!local) throw new Error("WebRTC answer 创建失败");
       if (local.type !== "answer") throw new Error("WebRTC 返回了非 answer 描述");
-      return { type: "answer", sdp: local.sdp };
+      return { type: "answer", sdp: local.sdp, videoMids };
     } catch (error) {
       await this.removePeer(peer);
       throw error;
@@ -107,11 +158,20 @@ export class RtcGateway {
     }
   }
 
-  broadcastFrame(frame: Buffer): void {
-    for (const peer of this.peers.values()) {
-      // A slow viewer never builds a frame queue; the next fresh frame wins.
-      this.send(peer.channels.get("robot-video-v1"), frame, 256 * 1024);
+  broadcastVideoFrame(camera: CameraIndex, jpegFrame: Buffer): void {
+    if (this.peers.size === 0) return;
+    if (this.decoding.has(camera)) {
+      this.pendingFrames.set(camera, jpegFrame);
+      return;
     }
+    this.decodeVideoFrame(camera, jpegFrame);
+  }
+
+  broadcastFrame(frame: Buffer): void {
+    if (frame.length < 10) return;
+    const camera = frame.readUInt8(0);
+    if (camera !== 1 && camera !== 2) return;
+    this.broadcastVideoFrame(camera, frame.subarray(9));
   }
 
   async close(): Promise<void> {
@@ -120,10 +180,11 @@ export class RtcGateway {
     this.peers.clear();
     this.controlOwner = null;
     for (const peer of peers) peer.pc.close();
+    await this.videoDecoder?.terminate();
   }
 
   private attachChannel(peer: RtcPeer, channel: RTCDataChannel): void {
-    if (!["robot-control-v1", "robot-state-v1", "robot-video-v1", "robot-safety-v1"].includes(channel.label)) {
+    if (!["robot-control-v1", "robot-state-v1", "robot-safety-v1"].includes(channel.label)) {
       channel.close();
       return;
     }
@@ -138,6 +199,32 @@ export class RtcGateway {
         this.releaseControl(peer, true);
       }
     };
+  }
+
+  private async addVideoTracks(peer: RTCPeerConnection): Promise<VideoTrackDescription> {
+    const offeredVideo = peer.getTransceivers().filter(
+      (transceiver: RTCRtpTransceiver) => transceiver.receiver.track.kind === "video",
+    );
+    if (offeredVideo.length < 2) throw new Error("WebRTC offer 必须包含两条 recvonly 视频通道");
+    const mids = {} as VideoTrackDescription;
+    for (const [offset, camera] of ([1, 2] as const).entries()) {
+      const track = this.videoTracks.get(camera);
+      if (!track) throw new Error(`摄像头 ${camera} 视频轨不可用`);
+      const transceiver = offeredVideo[offset];
+      await transceiver.sender.replaceTrack(track);
+      transceiver.direction = "sendonly";
+      const mid = transceiver.mid;
+      if (mid === null || mid === undefined) throw new Error(`摄像头 ${camera} 无法分配 WebRTC mid`);
+      mids[`camera${camera}`] = mid;
+    }
+    return mids;
+  }
+
+  private decodeVideoFrame(camera: CameraIndex, frame: Buffer): void {
+    if (!this.videoDecoder) return;
+    this.decoding.add(camera);
+    const jpegFrame = Uint8Array.from(frame);
+    this.videoDecoder.postMessage({ camera, jpeg: jpegFrame }, [jpegFrame.buffer]);
   }
 
   private handleControl(peer: RtcPeer, data: unknown): void {

@@ -18,11 +18,13 @@
     "@roamhq/wrtc": "^0.10.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
+    "jpeg-js": "^0.4.4",
     "ws": "^8.21.1"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
+    "@types/jpeg-js": "^0.3.0",
     "@types/node": "^26.1.1",
     "@types/ws": "^8.18.1",
     "ts-node": "^10.9.2",

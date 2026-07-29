@@ -1,5 +1,6 @@
 const assert = require("assert");
-const { RTCPeerConnection } = require("@roamhq/wrtc");
+const { RTCPeerConnection, nonstandard } = require("@roamhq/wrtc");
+const jpeg = require("jpeg-js");
 const { RtcGateway } = require("../dist/rtcGateway");
 
 function waitForChannel(channel, timeoutMs = 5000) {
@@ -53,8 +54,11 @@ async function main() {
   const client = new RTCPeerConnection();
   const control = client.createDataChannel("robot-control-v1", { ordered: false, maxRetransmits: 0 });
   const state = client.createDataChannel("robot-state-v1", { ordered: true });
-  const video = client.createDataChannel("robot-video-v1", { ordered: false, maxRetransmits: 0 });
   const safety = client.createDataChannel("robot-safety-v1", { ordered: true });
+  client.addTransceiver("video", { direction: "recvonly" });
+  client.addTransceiver("video", { direction: "recvonly" });
+  const tracks = new Map();
+  client.ontrack = (event) => tracks.set(event.transceiver.mid, event.track);
 
   try {
     const offer = await client.createOffer();
@@ -62,7 +66,7 @@ async function main() {
     await waitForIceGathering(client);
     const answer = await gateway.acceptOffer(client.localDescription);
     await client.setRemoteDescription(answer);
-    await Promise.all([control, state, video, safety].map((channel) => waitForChannel(channel)));
+    await Promise.all([control, state, safety].map((channel) => waitForChannel(channel)));
 
     control.send(JSON.stringify({ type: "action", seq: 1, joints: { joint_a: 0.5 } }));
     await Promise.race([
@@ -81,17 +85,48 @@ async function main() {
       { joint_a: 0.25 },
     );
 
-    const videoMessage = nextMessage(video);
-    gateway.broadcastFrame(Buffer.from([1, 2, 3, 4]));
-    assert.deepStrictEqual(Buffer.from(await videoMessage), Buffer.from([1, 2, 3, 4]));
+    assert.ok(answer.videoMids.camera1 !== answer.videoMids.camera2);
+    const camera1Track = tracks.get(answer.videoMids.camera1);
+    const camera2Track = tracks.get(answer.videoMids.camera2);
+    assert.ok(camera1Track, "camera1 RTP track must be negotiated");
+    assert.ok(camera2Track, "camera2 RTP track must be negotiated");
+
+    const sink = new nonstandard.RTCVideoSink(camera1Track);
+    const receivedFrame = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("RTP video frame timeout")), 5000);
+      sink.onframe = ({ frame }) => {
+        clearTimeout(timer);
+        resolve(frame);
+      };
+    });
+    const rgba = Buffer.alloc(4 * 4 * 4);
+    for (let offset = 0; offset < rgba.length; offset += 4) {
+      rgba[offset] = 40;
+      rgba[offset + 1] = 120;
+      rgba[offset + 2] = 220;
+      rgba[offset + 3] = 255;
+    }
+    const jpegFrame = jpeg.encode({ data: rgba, width: 4, height: 4 }, 90).data;
+    const transportFrame = Buffer.alloc(9 + jpegFrame.length);
+    transportFrame.writeUInt8(1, 0);
+    jpegFrame.copy(transportFrame, 9);
+    gateway.broadcastFrame(transportFrame);
+    const frame = await receivedFrame;
+    assert.strictEqual(frame.width, 4);
+    assert.strictEqual(frame.height, 4);
+    sink.stop();
     safety.send(JSON.stringify({ type: "stop" }));
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.strictEqual(safetyStops, 1);
-    console.log("WebRTC control/state/video DataChannel integration: OK");
+    console.log("WebRTC control/state/RTP video integration: OK");
   } finally {
     client.close();
     await gateway.close();
   }
+  // @roamhq/wrtc keeps RTCVideoSource native handles alive after all peers close.
+  // Explicit process termination avoids its teardown crash while preserving all
+  // signaling, RTP frame and control assertions above.
+  process.exit(0);
 }
 
 main().catch((error) => {

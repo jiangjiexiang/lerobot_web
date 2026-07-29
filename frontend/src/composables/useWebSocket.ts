@@ -50,6 +50,8 @@ export function useWebSocket() {
   const followerJoints = ref<JointData | null>(null);
   const cameraFrame = ref<string | null>(null);
   const camera2Frame = ref<string | null>(null);
+  const cameraStream = ref<MediaStream | null>(null);
+  const camera2Stream = ref<MediaStream | null>(null);
   const logs = ref<string[]>([]);
   const fatalError = ref<string | null>(null);
   const recording = ref<RecordingStatus>({
@@ -68,7 +70,6 @@ export function useWebSocket() {
   let rtcPeer: RTCPeerConnection | null = null;
   let rtcControl: RTCDataChannel | null = null;
   let rtcState: RTCDataChannel | null = null;
-  let rtcVideo: RTCDataChannel | null = null;
   let rtcSafety: RTCDataChannel | null = null;
   let rtcStateOpen = false;
   let rtcVideoOpen = false;
@@ -271,7 +272,9 @@ export function useWebSocket() {
     const hadVideo = rtcVideoOpen;
     rtcVideoOpen = false;
     metrics.value = { ...metrics.value, rtcConnected: false };
-    rtcControl = rtcState = rtcVideo = rtcSafety = null;
+    rtcControl = rtcState = rtcSafety = null;
+    cameraStream.value = null;
+    camera2Stream.value = null;
     const peer = rtcPeer;
     rtcPeer = null;
     peer?.close();
@@ -289,9 +292,9 @@ export function useWebSocket() {
       rtcPeer = peer;
       rtcControl = peer.createDataChannel("robot-control-v1", { ordered: false, maxRetransmits: 0 });
       rtcState = peer.createDataChannel("robot-state-v1", { ordered: true });
-      rtcVideo = peer.createDataChannel("robot-video-v1", { ordered: false, maxRetransmits: 0 });
       rtcSafety = peer.createDataChannel("robot-safety-v1", { ordered: true });
-      rtcVideo.binaryType = "arraybuffer";
+      peer.addTransceiver("video", { direction: "recvonly" });
+      peer.addTransceiver("video", { direction: "recvonly" });
 
       rtcState.onopen = () => {
         rtcStateOpen = true;
@@ -302,22 +305,35 @@ export function useWebSocket() {
       rtcState.onmessage = (event) => {
         try { handleMessage(JSON.parse(String(event.data))); } catch { /* ignore malformed state */ }
       };
-      rtcVideo.onopen = () => {
+      const pendingTracks = new Map<string, MediaStreamTrack>();
+      let videoMids: { camera1: string; camera2: string } | null = null;
+      const activeVideoMids = new Set<string>();
+      const activateRtcVideo = (mid: string, track: MediaStreamTrack) => {
+        if (!videoMids) return;
+        if (mid === videoMids.camera1) cameraStream.value = new MediaStream([track]);
+        if (mid === videoMids.camera2) camera2Stream.value = new MediaStream([track]);
+        activeVideoMids.add(mid);
         rtcVideoOpen = true;
-        if (streamReconnectTimer) { clearTimeout(streamReconnectTimer); streamReconnectTimer = null; }
-        streamWs?.close();
-      };
-      rtcVideo.onclose = () => {
-        const wasOpen = rtcVideoOpen;
-        rtcVideoOpen = false;
-        if (wasOpen && !disposed) connectStream();
-      };
-      rtcVideo.onmessage = (event) => {
-        if (event.data instanceof ArrayBuffer) {
-          handleBinaryFrame(event.data);
-        } else if (event.data instanceof Blob) {
-          void event.data.arrayBuffer().then(handleBinaryFrame);
+        if (activeVideoMids.size === 2) {
+          if (streamReconnectTimer) { clearTimeout(streamReconnectTimer); streamReconnectTimer = null; }
+          streamWs?.close();
         }
+      };
+      const installTrack = (mid: string, track: MediaStreamTrack) => {
+        if (!videoMids) { pendingTracks.set(mid, track); return; }
+        track.onunmute = () => activateRtcVideo(mid, track);
+        track.onended = () => {
+          activeVideoMids.delete(mid);
+          if (mid === videoMids?.camera1) cameraStream.value = null;
+          if (mid === videoMids?.camera2) camera2Stream.value = null;
+          rtcVideoOpen = activeVideoMids.size > 0;
+          if (!disposed) connectStream();
+        };
+        if (!track.muted) activateRtcVideo(mid, track);
+      };
+      peer.ontrack = (event) => {
+        const mid = event.transceiver.mid;
+        if (mid !== null) installTrack(mid, event.track);
       };
       peer.onconnectionstatechange = () => {
         if (["failed", "closed", "disconnected"].includes(peer.connectionState)) {
@@ -335,7 +351,9 @@ export function useWebSocket() {
       });
       const answer = await response.json();
       if (!response.ok) throw new Error(answer.error || "WebRTC signaling 失败");
+      videoMids = answer.videoMids;
       await peer.setRemoteDescription(answer);
+      for (const [mid, track] of pendingTracks) installTrack(mid, track);
     } catch (cause) {
       log(`WebRTC 不可用，继续使用 WebSocket: ${cause instanceof Error ? cause.message : String(cause)}`);
       closeRtc(!disposed);
@@ -434,6 +452,8 @@ export function useWebSocket() {
     followerJoints,
     cameraFrame,
     camera2Frame,
+    cameraStream,
+    camera2Stream,
     logs,
     fatalError,
     recording,

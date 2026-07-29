@@ -67,8 +67,8 @@
       </section>
 
       <section class="visuals" aria-label="机器人可视化">
-        <section class="panel view" aria-label="摄像头 1 画面"><MuJoCoView :frame="cameraViewsSwapped ? camera2Frame : cameraFrame" :fallback-src="cameraViewsSwapped ? '/video/camera2' : '/video/camera'" kicker="实时画面" title="摄像头 1" placeholder="等待摄像头 1 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera2 : activeCameras.camera}`" liveText="实时" waitText="等待" /></section>
-        <section class="panel view" aria-label="摄像头 2 画面"><MuJoCoView :frame="cameraViewsSwapped ? cameraFrame : camera2Frame" :fallback-src="cameraViewsSwapped ? '/video/camera' : '/video/camera2'" kicker="实时画面" title="摄像头 2" placeholder="等待摄像头 2 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera : activeCameras.camera2}`" liveText="实时" waitText="等待" /></section>
+        <section class="panel view" aria-label="摄像头 1 画面"><MuJoCoView :stream="cameraViewsSwapped ? camera2Stream : cameraStream" :frame="cameraViewsSwapped ? camera2Frame : cameraFrame" :fallback-src="cameraViewsSwapped ? '/video/camera2' : '/video/camera'" kicker="实时画面" title="摄像头 1" placeholder="等待摄像头 1 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera2 : activeCameras.camera}`" liveText="实时" waitText="等待" /></section>
+        <section class="panel view" aria-label="摄像头 2 画面"><MuJoCoView :stream="cameraViewsSwapped ? cameraStream : camera2Stream" :frame="cameraViewsSwapped ? cameraFrame : camera2Frame" :fallback-src="cameraViewsSwapped ? '/video/camera' : '/video/camera2'" kicker="实时画面" title="摄像头 2" placeholder="等待摄像头 2 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera : activeCameras.camera2}`" liveText="实时" waitText="等待" /></section>
         <section class="console" aria-label="运行控制台"><LogPanel :logs="logs" /></section>
       </section>
 
@@ -106,6 +106,8 @@ const {
   followerJoints,
   cameraFrame,
   camera2Frame,
+  cameraStream,
+  camera2Stream,
   logs,
   fatalError,
   recording,
