@@ -35,8 +35,11 @@ interface VideoTrackDescription {
 
 export interface RtcGatewayOptions {
   enabled: boolean;
+  videoEnabled?: boolean;
   iceServers?: IceServer[];
   controlTimeoutMs?: number;
+  maxVideoFps?: number;
+  maxVideoBitrate?: number;
   onControl: (message: Record<string, unknown>) => void;
   onSafetyStop: () => void;
   onControlLost: () => void;
@@ -48,6 +51,7 @@ export interface RtcGatewayOptions {
 export class RtcGateway {
   private readonly peers = new Map<string, RtcPeer>();
   private readonly enabled: boolean;
+  private readonly videoEnabled: boolean;
   private readonly iceServers: IceServer[];
   private readonly controlTimeoutMs: number;
   private readonly onControl: RtcGatewayOptions["onControl"];
@@ -57,18 +61,24 @@ export class RtcGateway {
   private watchdog: NodeJS.Timeout;
   private readonly videoSources = new Map<CameraIndex, nonstandard.RTCVideoSource>();
   private readonly videoTracks = new Map<CameraIndex, MediaStreamTrack>();
-  private readonly videoDecoder: Worker | null;
+  private readonly videoDecoders = new Map<CameraIndex, Worker>();
   private readonly decoding = new Set<CameraIndex>();
   private readonly pendingFrames = new Map<CameraIndex, Buffer>();
+  private readonly lastVideoFrameAt = new Map<CameraIndex, number>();
+  private readonly minVideoFrameIntervalMs: number;
+  private readonly maxVideoBitrate: number;
 
   constructor(options: RtcGatewayOptions) {
     this.enabled = options.enabled;
+    this.videoEnabled = this.enabled && options.videoEnabled === true;
     this.iceServers = options.iceServers || [];
     this.controlTimeoutMs = options.controlTimeoutMs || 750;
+    this.minVideoFrameIntervalMs = 1000 / Math.max(1, options.maxVideoFps || 15);
+    this.maxVideoBitrate = Math.max(100_000, options.maxVideoBitrate || 1_500_000);
     this.onControl = options.onControl;
     this.onSafetyStop = options.onSafetyStop;
     this.onControlLost = options.onControlLost;
-    if (this.enabled) {
+    if (this.videoEnabled) {
       for (const camera of [1, 2] as const) {
         const source = new nonstandard.RTCVideoSource();
         this.videoSources.set(camera, source);
@@ -77,35 +87,41 @@ export class RtcGateway {
     }
     const compiledDecoder = path.join(__dirname, "videoFrameDecoder.js");
     const decoderPath = fs.existsSync(compiledDecoder) ? compiledDecoder : path.join(__dirname, "videoFrameDecoder.ts");
-    this.videoDecoder = this.enabled
-      ? new Worker(decoderPath, fs.existsSync(compiledDecoder) ? undefined : { execArgv: ["-r", "ts-node/register"] })
-      : null;
-    this.videoDecoder?.on("message", (frame: { camera: CameraIndex; width?: number; height?: number; data?: Uint8Array }) => {
-      this.decoding.delete(frame.camera);
-      if (frame.width && frame.height && frame.data) {
-        this.videoSources.get(frame.camera)?.onFrame({
-          width: frame.width,
-          height: frame.height,
-          data: frame.data,
+    if (this.videoEnabled) {
+      for (const camera of [1, 2] as const) {
+        const decoder = new Worker(
+          decoderPath,
+          fs.existsSync(compiledDecoder) ? undefined : { execArgv: ["-r", "ts-node/register"] },
+        );
+        this.videoDecoders.set(camera, decoder);
+        decoder.on("message", (frame: { camera: CameraIndex; width?: number; height?: number; data?: Uint8Array }) => {
+          this.decoding.delete(camera);
+          if (frame.width && frame.height && frame.data) {
+            this.videoSources.get(camera)?.onFrame({ width: frame.width, height: frame.height, data: frame.data });
+          }
+          const pending = this.pendingFrames.get(camera);
+          if (pending) {
+            this.pendingFrames.delete(camera);
+            this.decodeVideoFrame(camera, pending);
+          }
         });
+        decoder.on("error", () => {
+          this.decoding.delete(camera);
+          this.pendingFrames.delete(camera);
+        });
+        decoder.unref();
       }
-      const pending = this.pendingFrames.get(frame.camera);
-      if (pending) {
-        this.pendingFrames.delete(frame.camera);
-        this.decodeVideoFrame(frame.camera, pending);
-      }
-    });
-    this.videoDecoder?.on("error", () => {
-      this.decoding.clear();
-      this.pendingFrames.clear();
-    });
-    this.videoDecoder?.unref();
+    }
     this.watchdog = setInterval(() => this.checkWatchdog(), 100);
     this.watchdog.unref();
   }
 
   isEnabled(): boolean {
     return this.enabled;
+  }
+
+  isVideoEnabled(): boolean {
+    return this.videoEnabled;
   }
 
   peerCount(): number {
@@ -137,7 +153,7 @@ export class RtcGateway {
 
     try {
       await peer.pc.setRemoteDescription(offer);
-      const videoMids = await this.addVideoTracks(peer.pc);
+      const videoMids = this.videoEnabled ? await this.addVideoTracks(peer.pc) : { camera1: "", camera2: "" };
       const answer = await peer.pc.createAnswer();
       await peer.pc.setLocalDescription(answer);
       await this.waitForIceGathering(peer.pc);
@@ -154,13 +170,19 @@ export class RtcGateway {
   broadcastControl(message: object): void {
     const data = JSON.stringify(message);
     for (const peer of this.peers.values()) {
-      this.send(peer.channels.get("robot-state-v1"), data, 256 * 1024);
+      // Telemetry is replaceable. Drop immediately when SCTP cannot keep up instead
+      // of allowing hundreds of milliseconds of stale observations to accumulate.
+      this.send(peer.channels.get("robot-state-v1"), data, 16 * 1024);
     }
   }
 
   broadcastVideoFrame(camera: CameraIndex, jpegFrame: Buffer): void {
     if (this.peers.size === 0) return;
+    const now = performance.now();
+    if (now - (this.lastVideoFrameAt.get(camera) || 0) < this.minVideoFrameIntervalMs) return;
+    this.lastVideoFrameAt.set(camera, now);
     if (this.decoding.has(camera)) {
+      // Decoder busy: replace the waiting frame. Never encode stale camera history.
       this.pendingFrames.set(camera, jpegFrame);
       return;
     }
@@ -180,7 +202,8 @@ export class RtcGateway {
     this.peers.clear();
     this.controlOwner = null;
     for (const peer of peers) peer.pc.close();
-    await this.videoDecoder?.terminate();
+    await Promise.all([...this.videoDecoders.values()].map((decoder) => decoder.terminate()));
+    this.videoDecoders.clear();
   }
 
   private attachChannel(peer: RtcPeer, channel: RTCDataChannel): void {
@@ -212,6 +235,15 @@ export class RtcGateway {
       if (!track) throw new Error(`摄像头 ${camera} 视频轨不可用`);
       const transceiver = offeredVideo[offset];
       await transceiver.sender.replaceTrack(track);
+      try {
+        const parameters = transceiver.sender.getParameters();
+        parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+        parameters.encodings[0].maxBitrate = this.maxVideoBitrate;
+        parameters.encodings[0].maxFramerate = Math.round(1000 / this.minVideoFrameIntervalMs);
+        await transceiver.sender.setParameters(parameters);
+      } catch {
+        // Older libwebrtc builds may reject encoding hints; latest-frame dropping still applies.
+      }
       transceiver.direction = "sendonly";
       const mid = transceiver.mid;
       if (mid === null || mid === undefined) throw new Error(`摄像头 ${camera} 无法分配 WebRTC mid`);
@@ -221,10 +253,11 @@ export class RtcGateway {
   }
 
   private decodeVideoFrame(camera: CameraIndex, frame: Buffer): void {
-    if (!this.videoDecoder) return;
+    const decoder = this.videoDecoders.get(camera);
+    if (!decoder) return;
     this.decoding.add(camera);
     const jpegFrame = Uint8Array.from(frame);
-    this.videoDecoder.postMessage({ camera, jpeg: jpegFrame }, [jpegFrame.buffer]);
+    decoder.postMessage({ camera, jpeg: jpegFrame }, [jpegFrame.buffer]);
   }
 
   private handleControl(peer: RtcPeer, data: unknown): void {

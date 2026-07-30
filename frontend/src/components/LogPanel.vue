@@ -5,7 +5,10 @@
         <span class="console-dot"></span>
         <h2>运行日志</h2>
       </div>
-      <span class="console-count">{{ logs.length }}</span>
+      <div class="console-actions">
+        <button :disabled="!logs.length" @click="exportLogs">导出日志</button>
+        <span class="console-count">{{ logs.length }}</span>
+      </div>
     </div>
     <div class="console-body" ref="logContainer" aria-live="polite">
       <div v-if="!logs.length" class="empty">等待系统事件…</div>
@@ -20,10 +23,20 @@ import { ref, watch, nextTick } from "vue";
 const props = defineProps<{ logs: string[] }>();
 const logContainer = ref<HTMLElement | null>(null);
 
+function exportLogs() {
+  const content = [...props.logs].reverse().join("\n") + "\n";
+  const url = URL.createObjectURL(new Blob([content], { type: "text/plain;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `lerobot-log-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 watch(() => props.logs.length, async () => {
   await nextTick();
   if (logContainer.value) {
-    logContainer.value.scrollTop = logContainer.value.scrollHeight;
+    logContainer.value.scrollTop = 0;
   }
 });
 </script>
@@ -71,6 +84,17 @@ watch(() => props.logs.length, async () => {
   background: #0f2640;
   font: 11px/1.5 ui-monospace, monospace;
 }
+.console-actions { display: flex; align-items: center; gap: 8px; }
+.console-actions button {
+  border: 1px solid rgba(139, 196, 221, 0.25);
+  border-radius: 6px;
+  padding: 3px 8px;
+  color: #8bc4dd;
+  background: rgba(15, 38, 64, 0.7);
+  font: 11px/1.4 ui-monospace, monospace;
+  cursor: pointer;
+}
+.console-actions button:disabled { opacity: 0.4; cursor: default; }
 .console-body {
   max-height: 160px;
   overflow-y: auto;

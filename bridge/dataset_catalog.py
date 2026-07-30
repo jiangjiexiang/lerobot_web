@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """Read LeRobot v3 dataset metadata for the web dataset workspace."""
 
+from __future__ import annotations
+
 import argparse
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pandas as pd
-
-try:
-    import cv2
-except ImportError:  # Quality scanning remains available without video decoding.
-    cv2 = None
+pd = None
+cv2 = None
 
 
 def read_json(path: Path, default):
@@ -240,6 +238,7 @@ def dataset_detail(dataset_root: Path) -> dict:
 
 
 def main() -> None:
+    global pd, cv2
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("list", "detail", "quality"))
     parser.add_argument("--root", required=True)
@@ -250,6 +249,16 @@ def main() -> None:
     if args.command == "list":
         result = {"root": str(root), "datasets": [dataset_summary(item) for item in dataset_dirs(root)]}
     else:
+        # 目录首页只读取小型 JSON 元数据，不应为此支付 Pandas/OpenCV
+        # 一秒级导入成本；详情与深度质量检查再按需加载。
+        import pandas as pandas_module
+        pd = pandas_module
+        if args.command == "quality":
+            try:
+                import cv2 as cv2_module
+                cv2 = cv2_module
+            except ImportError:
+                cv2 = None
         if not args.dataset or not args.dataset.replace("-", "").replace("_", "").replace(".", "").isalnum():
             raise ValueError("无效的数据集名称")
         dataset_root = (root / args.dataset).resolve()

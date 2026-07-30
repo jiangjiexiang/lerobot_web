@@ -43,14 +43,19 @@ cd ~/lerobot_web
 1. 检查 LeRobot Python、ROS 2、Node.js 和采集依赖。
 2. 首次运行时安装前后端 npm 依赖。
 3. 构建前端。
-4. 启动 Robot Server 和 Vite 网页。
-5. 在退出时回收本次启动的进程。
+4. 自动生成或复用局域网 HTTPS 证书。
+5. 启动 Robot Server 和 Vite 网页。
+6. 在退出时回收本次启动的进程。
+
+Robot Server 启动后会立即创建 `/follower/joint_states`、`/camera1/image_raw/compressed` 和 `/camera2/image_raw/compressed`。USB 相机帧无需启动遥操作即可发布；Follower 话题先注册，机械臂 bridge 启动后才发布真实关节状态。
 
 默认地址：
 
-- 网页：`http://localhost:5173`
+- 网页：脚本打印的 `https://<局域网IP>:5173`
 - Robot API：`http://localhost:43127`
-- 数据管理：`http://localhost:5173/#datasets`
+- 数据管理：`https://<局域网IP>:5173/#datasets`
+
+首次启动后，将 `.certs/lerobot-lan-ca.crt` 导入访问网页设备的受信任根证书。若自动检测的局域网 IP 不正确，可使用 `HTTPS_HOST=192.168.1.36 ./start_robot.sh`；临时使用 HTTP 可设置 `AUTO_HTTPS=0`。
 
 首次部署需要先执行一次：
 
@@ -136,6 +141,29 @@ ros2 topic info /follower/joint_states -v
 ros2 topic hz /camera1/image_raw/compressed
 ```
 
+### 不连接 Leader，直接通过 ROS 2 控制 Follower
+
+在网页“遥操作配置”中将“控制来源”选择为“ROS 2 话题”，填写 Follower
+串口和 ID 后点击“启动遥操作”。驱动成功打开后会出现：
+
+```text
+/follower/joint_trajectory_controller/joint_trajectory
+```
+
+该话题类型为 `trajectory_msgs/msg/JointTrajectory`。例如发送一次当前位置附近的
+小幅命令（SO-101 使用弧度，发布前请确认关节名称和安全范围）：
+
+```bash
+ros2 topic pub --once \
+  /follower/joint_trajectory_controller/joint_trajectory \
+  trajectory_msgs/msg/JointTrajectory \
+  "{joint_names: [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper],
+    points: [{positions: [0.0, -1.0, 1.0, -1.0, 0.0, 0.5]}]}"
+```
+
+命令只在 ROS 2 控制模式运行期间生效；停止遥操作会关闭 Follower 扭矩。带时间戳的
+命令超过 150 ms 会被拒绝，避免网络积压后执行旧轨迹。
+
 ## 数据采集
 
 在“遥操作”页面右侧填写数据集名称、任务、FPS 和 Episode 参数：
@@ -187,13 +215,19 @@ MCAP 插件缺失时默认回退到 sqlite3，并在网页录制状态中显示�
 
 ## 局域网 HTTPS
 
-浏览器 Web Serial 必须运行在安全上下文。生成本机局域网证书并一键启动：
+浏览器 Web Serial 必须运行在安全上下文。`start_robot.sh` 默认自动检测局域网 IP、生成证书并启用 HTTPS：
 
 ```bash
-./start_wifi_robot.sh --host-ip 192.168.1.50
+./start_robot.sh
 ```
 
-将 `.certs/lerobot-lan-ca.crt` 导入操作电脑的受信任根证书，然后访问脚本打印的 HTTPS 地址。WSL2 端口转发见 [WSL2 局域网说明](docs/WSL_LAN_ACCESS.md)。
+如需明确指定访问 IP：
+
+```bash
+HTTPS_HOST=192.168.1.50 ./start_robot.sh
+```
+
+将 `.certs/lerobot-lan-ca.crt` 导入操作电脑的受信任根证书，然后访问脚本打印的 HTTPS 地址。`start_wifi_robot.sh --host-ip 192.168.1.50` 仍可使用。WSL2 端口转发见 [WSL2 局域网说明](docs/WSL_LAN_ACCESS.md)。
 
 ## 常用排查
 
@@ -211,13 +245,21 @@ curl http://localhost:43127/health
 CAMERA_FPS=15 CAMERA_WIDTH=640 CAMERA_HEIGHT=360 ./start_robot.sh
 ```
 
+Jetson 默认采用混合低延迟模式：控制与状态走 WebRTC DataChannel，视频保持摄像头
+原生 MJPEG 并通过只保留最新帧的视频通道发送，避免 MJPEG → I420 → VP8 的二次
+软件转码。需要在性能更强的平台测试纯 WebRTC 视频时可开启：
+
+```bash
+ENABLE_WEBRTC_VIDEO=1 RTC_VIDEO_FPS=15 RTC_VIDEO_BITRATE=1500000 ./start_robot.sh
+```
+
 不要同时运行校准程序、独立机械臂驱动和网页遥操作，它们会争用串口。首次带实机运行时保持低速、小幅动作，并确保 Follower 周围没有障碍物。
 
 ## 项目结构
 
 ```text
 bridge/
-  camera_stream.py             USB 相机采集
+  camera_stream.py             旧版 OpenCV USB 相机采集（兼容保留）
   dataset_recorder.py          LeRobot Episode 录制
   lerobot_dataset_compat.py    LeRobot 0.4/0.5 兼容层
   dataset_catalog.py           数据集读取与质量扫描

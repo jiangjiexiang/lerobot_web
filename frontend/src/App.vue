@@ -37,6 +37,7 @@
           <button :class="{ active: workspace === 'control' }" @click="workspace = 'control'"><span class="nav-icon">⌁</span><span class="nav-text">遥操作</span></button>
           <button :class="{ active: workspace === 'datasets' }" @click="workspace = 'datasets'"><span class="nav-icon">▤</span><span class="nav-text">数据管理</span></button>
           <button :class="{ active: workspace === 'training' }" @click="workspace = 'training'"><span class="nav-icon">▷</span><span class="nav-text">训练管理</span></button>
+          <button :class="{ active: workspace === 'logs' }" @click="workspace = 'logs'"><span class="nav-icon">≡</span><span class="nav-text">日志管理</span></button>
         </nav>
       </aside>
 
@@ -80,7 +81,8 @@
       </aside>
         </main>
         <DatasetWorkspace v-else-if="workspace === 'datasets'" />
-        <TrainingWorkspace v-else />
+        <TrainingWorkspace v-else-if="workspace === 'training'" />
+        <LogWorkspace v-else :logs="logs" @clear="clearLogs" />
       </div>
     </div>
   </div>
@@ -97,6 +99,7 @@ import LogPanel from "./components/LogPanel.vue";
 import RecordingPanel from "./components/RecordingPanel.vue";
 import DatasetWorkspace from "./components/DatasetWorkspace.vue";
 import TrainingWorkspace from "./components/TrainingWorkspace.vue";
+import LogWorkspace from "./components/LogWorkspace.vue";
 import { useLeaderSerial } from "./composables/useLeaderSerial";
 
 const {
@@ -113,6 +116,7 @@ const {
   recording,
   metrics,
   log,
+  clearLogs,
   send,
 } = useWebSocket();
 const { connected: serialConnected, error: serialError, connect: connectLeader, disconnect: disconnectLeader } = useLeaderSerial(send, log, stopAfterLeaderFailure);
@@ -121,13 +125,20 @@ const modalError = computed({
   set: (value) => { fatalError.value = value; frontError.value = value; },
 });
 const frontError = ref<string | null>(null);
-type Workspace = "control" | "datasets" | "training";
-const initialWorkspace: Workspace = location.hash === "#datasets" ? "datasets" : location.hash === "#training" ? "training" : "control";
+type Workspace = "control" | "datasets" | "training" | "logs";
+const initialWorkspace: Workspace = location.hash === "#datasets"
+  ? "datasets"
+  : location.hash === "#training"
+    ? "training"
+    : location.hash === "#logs"
+      ? "logs"
+      : "control";
 const workspace = ref<Workspace>(initialWorkspace);
 const pageContext = computed(() => ({
   control: { title: "遥操作控制台" },
   datasets: { title: "数据管理平台" },
   training: { title: "训练管理平台" },
+  logs: { title: "日志管理" },
 })[workspace.value]);
 
 const ports = ref<string[]>([]);
@@ -268,6 +279,7 @@ async function handleStart(config: Record<string, unknown>) {
     fps: config.fps,
     viewer: config.viewer,
     remote_leader: config.remoteLeader,
+    command_source: config.commandSource,
     // 机器人本地 USB 摄像头：/dev/video0 对应 OpenCV 索引 0。
     // 摄像头由 robot-server 的独立 camera_stream 进程采集，避免和遥操作进程抢占设备。
     camera_index: config.cameraIndex,
@@ -346,16 +358,16 @@ onMounted(async () => {
 }
 body {
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #09111f;
-  color: #e7edf8;
+  background: #050505;
+  color: #f4f4f5;
   min-height: 100vh;
 }
 .app-shell {
   min-height: 100vh;
   background:
-    radial-gradient(circle at 72% -10%, rgba(38, 150, 214, 0.20), transparent 34rem),
-    radial-gradient(circle at 0% 100%, rgba(78, 85, 206, 0.16), transparent 34rem),
-    #09111f;
+    radial-gradient(circle at 72% -10%, rgba(124, 92, 255, 0.10), transparent 32rem),
+    radial-gradient(circle at 0% 100%, rgba(255, 255, 255, 0.035), transparent 32rem),
+    #050505;
 }
 .self-check-overlay { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 20px; background: rgba(2, 8, 16, .82); backdrop-filter: blur(8px); }
 .self-check-modal { width: min(480px, 100%); padding: 24px; border: 1px solid rgba(119, 188, 225, .25); border-radius: 18px; background: #0d1c2e; box-shadow: 0 24px 80px rgba(0, 0, 0, .5); }
@@ -396,7 +408,7 @@ body {
 .fatal-actions button { padding: 9px 16px; border: 0; border-radius: 8px; cursor: pointer; font-weight: 600; }
 .fatal-actions .primary { color: #06101a; background: #64d6f4; }
 .app-layout { display: grid; grid-template-columns: 184px minmax(0, 1fr); min-height: 100vh; }
-.workspace-sidebar { position: sticky; top: 0; height: 100vh; padding: 20px 12px; border-right: 1px solid rgba(160, 190, 220, .13); background: #081421; }
+.workspace-sidebar { position: sticky; top: 0; height: 100vh; padding: 20px 12px; border-right: 1px solid #202020; background: #080808; }
 .app-content { min-width: 0; }
 .header {
   min-height: 72px;
@@ -404,15 +416,17 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid rgba(160, 190, 220, 0.13);
+  border-bottom: 1px solid #202020;
+  background: rgba(8, 8, 8, .82);
+  backdrop-filter: blur(14px);
 }
 .page-context h1 { margin-top: 2px; font-size: 17px; }
 .nav-label { margin: 4px 8px 10px; color: #526d82; font-size: 9px; }
 .workspace-tabs { display: flex; flex-direction: column; gap: 3px; }
 .workspace-tabs button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 40px; padding: 8px 10px; border: 0; border-radius: 5px; cursor: pointer; text-align: left; background: transparent; color: #7891a5; font-size: 11px; }
-.workspace-tabs button:hover { background: #102638; color: #b8d0e1; }
-.workspace-tabs button.active { color: #e8f6ff; background: #1b4966; }
-.nav-icon { width: 17px; color: #81bed8; font: 15px/1 ui-monospace, monospace; text-align: center; }
+.workspace-tabs button:hover { background: #151515; color: #dedede; }
+.workspace-tabs button.active { color: #fff; background: #242424; box-shadow: inset 2px 0 #8b78ff; }
+.nav-icon { width: 17px; color: #a998ff; font: 15px/1 ui-monospace, monospace; text-align: center; }
 .eyebrow { color: #78a9c6; font-size: 10px; font-weight: 700; letter-spacing: 1.4px; }
 .header h1 { font-size: 20px; letter-spacing: -0.3px; margin-top: 2px; }
 .main {
@@ -426,11 +440,34 @@ body {
   align-items: start;
 }
 .panel {
-  background: rgba(15, 30, 50, 0.86);
-  border: 1px solid rgba(151, 188, 222, 0.15);
+  background: rgba(13, 13, 13, 0.92);
+  border: 1px solid #242424;
   border-radius: 16px;
   padding: 18px;
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.18);
+}
+/* Unified neutral-black surfaces across every workspace. Status colors remain semantic. */
+.app-shell :is(
+  .training-layout,.training-toolbar,.config-pane,.host-strip,.live-resources,
+  .evaluation-layout,.evaluation-config,.evaluation-jobs,.evaluation-detail,
+  .deployment-workspace,.deploy-config,.revision-pane,.incident-pane,
+  .log-toolbar,.log-filters,.log-list,.date-list,.log-body,
+  .dataset-snapshot,.preflight-panel,.metrics-panel,.checkpoint-panel,.model-panel,
+  .command,.logs,.comparison-chart,.cloud-spec,.incident-form,
+  .control-section,.mode-options
+) { background-color: #0d0d0d !important; border-color: #272727 !important; }
+.app-shell :is(input,select,textarea) {
+  border-color: #303030 !important;
+  background-color: #101010 !important;
+  color: #ededed !important;
+}
+.app-shell :is(.workspace-tabs,.job-detail dl,.evaluation-detail dl,.result-summary,.dataset-snapshot,.result-layout) {
+  background-color: #0a0a0a !important;
+  border-color: #272727 !important;
+}
+.app-shell :is(.workspace-tabs button.active,.result-list button.active,.job-row.active) {
+  background-color: #242126 !important;
+  color: #fff !important;
 }
 .ctrl { grid-area: control; }
 .ctrl, .joints { align-self: start; }
@@ -459,7 +496,7 @@ body {
 @media (max-width: 760px) {
   .app-layout { display: block; }
   .workspace-sidebar { position: sticky; z-index: 20; top: 0; width: 100%; height: auto; padding: 6px 10px; border-right: 0; border-bottom: 1px solid rgba(160, 190, 220, .13); }
-  .workspace-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+  .workspace-tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
   .workspace-tabs button { min-height: 36px; gap: 6px; }
   .nav-text { display: inline; }
   .nav-icon { font-size: 15px; }

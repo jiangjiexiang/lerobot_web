@@ -9,6 +9,12 @@ const port = 44000 + Math.floor(Math.random() * 1000);
 const baseUrl = `http://127.0.0.1:${port}`;
 const datasetRoot = fs.mkdtempSync(path.join(os.tmpdir(), "lerobot-web-api-test-"));
 const logs = [];
+const appPython = [
+  process.env.LEROBOT_TEST_PYTHON,
+  "/home/nvidia/miniconda3/envs/lerobot/bin/python3",
+  "/home/jiang/miniconda3/envs/lerobot/bin/python3",
+].find((candidate) => candidate && fs.existsSync(candidate));
+if (!appPython) throw new Error("找不到 LeRobot 测试 Python；可设置 LEROBOT_TEST_PYTHON");
 
 function startWithRos(command, args, extraEnv = {}) {
   const quoted = [command, ...args].map((value) => JSON.stringify(value)).join(" ");
@@ -54,7 +60,7 @@ async function main() {
     ROS2_DRIVER: "external",
     ROS2_COMMAND_SOURCE: "leader",
     ROS_PYTHON_PATH: "/usr/bin/python3",
-    PYTHON_PATH: "/home/jiang/miniconda3/envs/lerobot/bin/python3",
+    PYTHON_PATH: appPython,
     ROS2_BRIDGE_SCRIPT: path.join(
       projectRoot,
       "ros2_ws/src/lerobot_ros2_bridge/lerobot_ros2_bridge/web_bridge.py",

@@ -93,6 +93,8 @@ export function useWebSocket() {
   let disposed = false;
   let pingTimer: number | null = null;
   let rtcHeartbeatTimer: number | null = null;
+  let lastLogMessage = "";
+  let lastLogAt = 0;
   // 机器人上位机时钟与浏览器时钟不同步（无 NTP），直接用两台设备的时间戳相减会得到
   // 无意义甚至负数的延迟，被 Math.max(0, ...) 钳制后就一直显示 0ms。
   // 用控制 WebSocket 做一次简易 NTP 式估算：clockOffset = 机器人时钟 - 浏览器时钟。
@@ -177,9 +179,20 @@ export function useWebSocket() {
   }
 
   function log(msg: string) {
+    const now = Date.now();
+    // 控制状态会同时走 WebSocket 与 WebRTC；合并紧邻的同一事件。
+    if (msg === lastLogMessage && now - lastLogAt < 1000) return;
+    lastLogMessage = msg;
+    lastLogAt = now;
     const t = new Date().toLocaleTimeString();
     logs.value.unshift(`[${t}] ${msg}`);
-    if (logs.value.length > 50) logs.value.pop();
+    if (logs.value.length > 500) logs.value.length = 500;
+  }
+
+  function clearLogs() {
+    logs.value = [];
+    lastLogMessage = "";
+    lastLogAt = 0;
   }
 
   function connect() {
@@ -291,10 +304,14 @@ export function useWebSocket() {
       const peer = new RTCPeerConnection({ iceServers: config.iceServers || [] });
       rtcPeer = peer;
       rtcControl = peer.createDataChannel("robot-control-v1", { ordered: false, maxRetransmits: 0 });
-      rtcState = peer.createDataChannel("robot-state-v1", { ordered: true });
+      // State is real-time telemetry: an old sample is useless, so never retransmit or preserve ordering.
+      rtcState = peer.createDataChannel("robot-state-v1", { ordered: false, maxRetransmits: 0 });
       rtcSafety = peer.createDataChannel("robot-safety-v1", { ordered: true });
-      peer.addTransceiver("video", { direction: "recvonly" });
-      peer.addTransceiver("video", { direction: "recvonly" });
+      const rtcVideoEnabled = config.videoEnabled === true;
+      if (rtcVideoEnabled) {
+        peer.addTransceiver("video", { direction: "recvonly" });
+        peer.addTransceiver("video", { direction: "recvonly" });
+      }
 
       rtcState.onopen = () => {
         rtcStateOpen = true;
@@ -333,6 +350,16 @@ export function useWebSocket() {
       };
       peer.ontrack = (event) => {
         const mid = event.transceiver.mid;
+        const receiver = event.receiver as RTCRtpReceiver & {
+          playoutDelayHint?: number;
+          jitterBufferTarget?: number;
+        };
+        try {
+          receiver.playoutDelayHint = 0;
+          receiver.jitterBufferTarget = 0;
+        } catch {
+          // Experimental low-latency hints are not available in every browser.
+        }
         if (mid !== null) installTrack(mid, event.track);
       };
       peer.onconnectionstatechange = () => {
@@ -399,6 +426,13 @@ export function useWebSocket() {
           resume: msg.resume === true,
         };
         break;
+      case "bridge_log": {
+        const source = msg.source === "recorder" ? "录制" : "遥操作";
+        const level = msg.level === "error" || msg.level === "stderr" ? "错误" : msg.level === "warn" ? "警告" : "信息";
+        const message = typeof msg.message === "string" ? msg.message : "未知日志";
+        log(`[${source}/${level}] ${message}`);
+        break;
+      }
     }
   }
 
@@ -459,6 +493,7 @@ export function useWebSocket() {
     recording,
     metrics,
     log,
+    clearLogs,
     send,
   };
 }

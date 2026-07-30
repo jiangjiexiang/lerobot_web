@@ -29,8 +29,13 @@ export CAMERA_FPS="${CAMERA_FPS:-30}"
 export CAMERA_WIDTH="${CAMERA_WIDTH:-640}"
 export CAMERA_HEIGHT="${CAMERA_HEIGHT:-360}"
 export STREAM_FPS="${STREAM_FPS:-0}"
+export RTC_VIDEO_FPS="${RTC_VIDEO_FPS:-15}"
+export RTC_VIDEO_BITRATE="${RTC_VIDEO_BITRATE:-1500000}"
+export ENABLE_WEBRTC_VIDEO="${ENABLE_WEBRTC_VIDEO:-0}"
 HTTPS_CERT="${HTTPS_CERT:-}"
 HTTPS_KEY="${HTTPS_KEY:-}"
+AUTO_HTTPS="${AUTO_HTTPS:-1}"
+HTTPS_HOST="${HTTPS_HOST:-}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 
 echo "=== ROS 2 数据采集平台一键启动 ==="
@@ -43,7 +48,7 @@ fi
 if [ "$ENABLE_CAMERA" = "0" ]; then
     echo "摄像头: 外部 ROS 2 话题"
 else
-    echo "摄像头: 自动检测 USB 摄像头 (MJPG/YUYV ${CAMERA_WIDTH}x${CAMERA_HEIGHT}@$CAMERA_FPS FPS)"
+    echo "摄像头: 自动检测 USB 摄像头 (GStreamer MJPG ${CAMERA_WIDTH}x${CAMERA_HEIGHT}@$CAMERA_FPS FPS)"
 fi
 
 # 清理上次异常退出后仍占用服务端口的进程。
@@ -72,6 +77,35 @@ if [ -n "$PORT_PIDS" ]; then
     if [ -n "$PORT_PIDS" ]; then
         echo "旧进程未正常退出，强制清理: $PORT_PIDS"
         kill -9 $PORT_PIDS 2>/dev/null || true
+    fi
+fi
+
+if [ -z "$HTTPS_CERT" ] && [ -z "$HTTPS_KEY" ] && [ "$AUTO_HTTPS" != "0" ]; then
+    if [ -z "$HTTPS_HOST" ]; then
+        HTTPS_HOST="$(hostname -I 2>/dev/null | awk '{
+            for (i = 1; i <= NF; i++) if ($i ~ /^192\.168\./) { print $i; exit }
+            for (i = 1; i <= NF; i++) if ($i ~ /^172\.(1[6-9]|2[0-9]|3[01])\./) { print $i; exit }
+            for (i = 1; i <= NF; i++) if ($i ~ /^10\./) { print $i; exit }
+            for (i = 1; i <= NF; i++) if ($i !~ /^127\./ && $i !~ /:/) { print $i; exit }
+        }')"
+    fi
+    if [ -z "$HTTPS_HOST" ]; then
+        HTTPS_HOST="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+    fi
+    if ! [[ "$HTTPS_HOST" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        echo "错误: 无法自动检测用于 HTTPS 的局域网 IPv4"
+        echo "请指定地址后重试: HTTPS_HOST=192.168.1.36 ./start_robot.sh"
+        echo "或临时使用 HTTP: AUTO_HTTPS=0 ./start_robot.sh"
+        exit 1
+    fi
+
+    CERT_DIR="$DIR/.certs"
+    HTTPS_CERT="$CERT_DIR/lerobot-lan.crt"
+    HTTPS_KEY="$CERT_DIR/lerobot-lan.key"
+    if [ ! -f "$HTTPS_CERT" ] || [ ! -f "$HTTPS_KEY" ] \
+        || ! openssl x509 -in "$HTTPS_CERT" -noout -checkip "$HTTPS_HOST" >/dev/null 2>&1; then
+        echo "正在为 $HTTPS_HOST 生成局域网 HTTPS 证书..."
+        "$DIR/scripts/generate-lan-cert.sh" "$HTTPS_HOST"
     fi
 fi
 
@@ -108,8 +142,14 @@ elif [ "$NEEDS_APP_PYTHON" -eq 1 ]; then
 fi
 
 if [ "$ENABLE_CAMERA" != "0" ]; then
-    if ! "$PYTHON_PATH" -c "import cv2, numpy; from lerobot.datasets.lerobot_dataset import LeRobotDataset" >/dev/null 2>&1; then
-        echo "错误: $PYTHON_PATH 缺少摄像头或 LeRobotDataset 采集依赖"
+    if ! command -v gst-launch-1.0 >/dev/null 2>&1 \
+        || ! gst-inspect-1.0 v4l2src fdsink >/dev/null 2>&1; then
+        echo "错误: 缺少 GStreamer 摄像头运行时或 v4l2src/fdsink 插件"
+        echo "请安装: sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-good"
+        exit 1
+    fi
+    if ! "$PYTHON_PATH" -c "from lerobot.datasets.lerobot_dataset import LeRobotDataset" >/dev/null 2>&1; then
+        echo "错误: $PYTHON_PATH 缺少 LeRobotDataset 采集依赖"
         echo "请在 LeRobot 环境安装项目与机械臂依赖，例如:"
         echo "  $PYTHON_PATH -m pip install -e '/home/jiang/lerobot[feetech]'"
         exit 1
@@ -217,7 +257,11 @@ fi
 
 echo ""
 echo "========================================"
-echo "  浏览器打开: $WEB_SCHEME://localhost:$FRONTEND_PORT"
+if [ -n "$HTTPS_HOST" ]; then
+    echo "  浏览器打开: $WEB_SCHEME://$HTTPS_HOST:$FRONTEND_PORT"
+else
+    echo "  浏览器打开: $WEB_SCHEME://localhost:$FRONTEND_PORT"
+fi
 echo "  API 服务:   http://localhost:$PORT"
 echo "  Ctrl+C 退出"
 echo "========================================"

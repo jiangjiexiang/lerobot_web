@@ -23,13 +23,15 @@
     </div>
 
     <div class="form-group leader-mode">
-      <label>主臂连接方式</label>
+      <label>控制来源</label>
       <div class="mode-options" role="group" aria-label="主臂连接方式">
-        <button type="button" :class="{ active: !local.remoteLeader }" @click="local.remoteLeader = false">本机串口</button>
-        <button type="button" :class="{ active: local.remoteLeader }" @click="local.remoteLeader = true">网页 COM <span>双电脑</span></button>
+        <button type="button" :class="{ active: local.controlMode === 'leader' }" @click="local.controlMode = 'leader'">Leader 串口</button>
+        <button type="button" :class="{ active: local.controlMode === 'web' }" @click="local.controlMode = 'web'">网页 COM</button>
+        <button type="button" :class="{ active: local.controlMode === 'ros' }" @click="local.controlMode = 'ros'">ROS 2 话题</button>
       </div>
-      <small v-if="local.remoteLeader" class="field-note">操作电脑使用 HTTPS 的 Chrome / Edge 连接 Leader COM。</small>
-      <template v-else>
+      <small v-if="local.controlMode === 'web'" class="field-note">操作电脑使用 HTTPS 的 Chrome / Edge 连接 Leader COM。</small>
+      <small v-else-if="local.controlMode === 'ros'" class="field-note">无需 Leader；启动后发布 JointTrajectory 到 Follower 命令话题。</small>
+      <template v-else-if="local.controlMode === 'leader'">
         <label>Leader 串口 <span>主臂</span></label>
         <select v-model="local.leaderPort">
           <option v-for="p in ports" :key="p" :value="p">{{ p }}</option>
@@ -37,7 +39,7 @@
       </template>
     </div>
 
-    <div class="form-group">
+    <div v-if="local.controlMode !== 'ros'" class="form-group">
       <label>Leader ID</label>
       <input v-model="local.leaderId" placeholder="如 R07253102" />
     </div>
@@ -70,7 +72,7 @@
       </div>
     </div>
 
-    <template v-if="local.remoteLeader">
+    <template v-if="local.controlMode === 'web'">
       <button class="btn btn-connect" :disabled="serialConnected" @click="$emit('connectLeader', { leaderId: local.leaderId, fps: local.fps })">
         {{ serialConnected ? "Leader COM 已连接" : "连接 Leader COM" }}
       </button>
@@ -78,7 +80,7 @@
       <p v-if="serialError" class="serial-error">{{ serialError }}</p>
     </template>
 
-    <button class="btn btn-start" :disabled="running || busy || (local.remoteLeader && !serialConnected)" @click="$emit('start', { ...local, viewer: false })">
+    <button class="btn btn-start" :disabled="running || busy || (local.controlMode === 'web' && !serialConnected)" @click="$emit('start', { ...local, remoteLeader: local.controlMode === 'web', commandSource: local.controlMode, viewer: false })">
       {{ busy && !running ? "正在启动…" : running ? "遥操作运行中" : "启动遥操作" }}
     </button>
     <button class="btn btn-stop" :disabled="!running || busy" @click="$emit('stop')">
@@ -120,7 +122,7 @@ const local = reactive({
   cameraIndex: 0,
   camera2Index: 0,
   fps: 60,
-  remoteLeader: false,
+  controlMode: "leader" as "leader" | "web" | "ros",
 });
 
 function selectCamera(view: "camera" | "camera2", index: number) {
@@ -196,7 +198,7 @@ h2 { font-size: 18px; margin-top: 3px; letter-spacing: -0.25px;
 .form-group label span { color: #6f91aa; font-size: 11px; }
 .field-note { display: block; color: #7894ab; line-height: 1.4; margin-top: 5px; }
 .leader-mode { margin-bottom: 12px; }
-.mode-options { display: grid; grid-template-columns: 1fr 1.25fr; gap: 5px; padding: 4px; border: 1px solid #29435f; border-radius: 9px; background: #0a1728; }
+.mode-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; padding: 4px; border: 1px solid #29435f; border-radius: 9px; background: #0a1728; }
 .mode-options button { min-height: 34px; padding: 5px 6px; border: 0; border-radius: 6px; background: transparent; color: #8098ad; font-size: 12px; cursor: pointer; transition: background .18s, color .18s; }
 .mode-options button.active { color: #e7f9ff; background: #1b5273; box-shadow: 0 2px 8px rgba(0,0,0,.18); }
 .mode-options span { display: block; margin-top: 1px; color: inherit; font-size: 10px; opacity: .7; }

@@ -24,6 +24,7 @@ setup(
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
+            "idle_topics = lerobot_ros2_bridge.idle_topics:main",
             "web_bridge = lerobot_ros2_bridge.web_bridge:main",
         ],
     },

@@ -37,6 +37,7 @@ def _writer_options(
     image_writer_threads: int,
     streaming_encoding: bool,
     vcodec: str | None,
+    video_backend: str,
     target: Any,
 ) -> dict[str, Any]:
     parameters = inspect.signature(target).parameters
@@ -47,6 +48,8 @@ def _writer_options(
         options["streaming_encoding"] = streaming_encoding
     if vcodec and "vcodec" in parameters:
         options["vcodec"] = vcodec
+    if "video_backend" in parameters:
+        options["video_backend"] = video_backend
     return options
 
 
@@ -60,11 +63,13 @@ def create_dataset(
     image_writer_threads: int = 4,
     streaming_encoding: bool = True,
     vcodec: str | None = None,
+    video_backend: str = "pyav",
 ) -> LeRobotDataset:
     options = _writer_options(
         image_writer_threads=image_writer_threads,
         streaming_encoding=streaming_encoding,
         vcodec=vcodec,
+        video_backend=video_backend,
         target=LeRobotDataset.create,
     )
     return LeRobotDataset.create(
@@ -85,6 +90,7 @@ def resume_dataset(
     image_writer_threads: int = 4,
     streaming_encoding: bool = True,
     vcodec: str | None = None,
+    video_backend: str = "pyav",
 ) -> LeRobotDataset:
     resume = getattr(LeRobotDataset, "resume", None)
     if callable(resume):
@@ -92,11 +98,12 @@ def resume_dataset(
             image_writer_threads=image_writer_threads,
             streaming_encoding=streaming_encoding,
             vcodec=vcodec,
+            video_backend=video_backend,
             target=resume,
         )
         return resume(repo_id=repo_id, root=root, **options)
 
-    dataset = LeRobotDataset(repo_id, root=root)
+    dataset = LeRobotDataset(repo_id, root=root, video_backend=video_backend)
     dataset.start_image_writer(num_processes=0, num_threads=image_writer_threads)
     return dataset
 

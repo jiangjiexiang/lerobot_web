@@ -20,6 +20,8 @@ export class RobotBridge extends EventEmitter {
   private args: string[];
   private pythonPath: string;
   private stderrTail: string[] = [];
+  private stderrBuffer = "";
+  private readonly maxLogLength = 1000;
 
   constructor(bridgePath: string, args: string[], pythonPath: string = "python3") {
     super();
@@ -29,7 +31,7 @@ export class RobotBridge extends EventEmitter {
   }
 
   start(): void {
-    console.log(`[RobotBridge] 启动 Python 桥接: ${this.pythonPath} ${this.bridgePath} ${this.args.join(" ")}`);
+    this.writeLog("info", `启动 Python 桥接: ${this.pythonPath} ${this.bridgePath} ${this.args.join(" ")}`);
 
     this.process = spawn(this.pythonPath, [this.bridgePath, ...this.args], {
       stdio: ["pipe", "pipe", "pipe"],
@@ -56,23 +58,23 @@ export class RobotBridge extends EventEmitter {
             const msg: BridgeMessage = JSON.parse(line);
             this.emit("message", msg);
           } catch {
-            // 非 JSON 行，当作日志输出
-            console.log(`[Python] ${line.trim()}`);
+            this.writeLog("warn", `忽略无法解析的 Python 输出: ${this.sanitizeLog(line)}`);
           }
         }
       }
     });
 
     this.process.stderr?.on("data", (data: Buffer) => {
-      const text = data.toString();
-      console.log(`[Python stderr] ${text.trim()}`);
-      // 保留最后若干行，用于进程异常退出时向前端展示 Python 报错原因（如 Traceback 的最后一行）。
-      this.stderrTail.push(...text.split("\n").filter((line) => line.trim()));
-      if (this.stderrTail.length > 20) this.stderrTail = this.stderrTail.slice(-20);
+      this.stderrBuffer += data.toString();
+      const lines = this.stderrBuffer.split(/\r?\n/);
+      this.stderrBuffer = lines.pop() || "";
+      for (const line of lines) this.handleStderrLine(line);
     });
 
     this.process.on("exit", (code) => {
-      console.log(`[RobotBridge] Python 进程退出, code=${code}`);
+      if (this.stderrBuffer.trim()) this.handleStderrLine(this.stderrBuffer);
+      this.stderrBuffer = "";
+      this.writeLog(code === 0 ? "info" : "error", `Python 进程退出 (code=${code})`);
       this.emit("exit", code, code && code !== 0 ? this.lastErrorLine() : null);
     });
 
@@ -121,5 +123,50 @@ export class RobotBridge extends EventEmitter {
     const errorLine = [...this.stderrTail].reverse().find((line) => /Error[:\s]/.test(line));
     if (errorLine) return errorLine.trim();
     return this.stderrTail.length > 0 ? this.stderrTail[this.stderrTail.length - 1].trim() : null;
+  }
+
+  private sanitizeLog(value: string): string {
+    const text = value.trim();
+    if (text.length <= this.maxLogLength) return text;
+    return `${text.slice(0, this.maxLogLength)}… [已截断 ${text.length - this.maxLogLength} 字符]`;
+  }
+
+  private handleStderrLine(line: string): void {
+    const message = this.sanitizeLog(line);
+    if (!message) return;
+    // 保留最后若干行，用于进程异常退出时向前端展示 Python 报错原因。
+    this.stderrTail.push(message);
+    if (this.stderrTail.length > 20) this.stderrTail = this.stderrTail.slice(-20);
+    if (!this.shouldSuppressStderr(message)) {
+      this.writeLog(this.classifyStderr(message), message);
+    }
+  }
+
+  private shouldSuppressStderr(message: string): boolean {
+    return (
+      /^\[libx264\b/.test(message)
+      || /^\[Teleop\] 已运行 \d+ 帧$/.test(message)
+      || /^frame=\s*\d+/.test(message)
+    );
+  }
+
+  private classifyStderr(message: string): "info" | "warn" | "error" {
+    if (
+      /^\[Teleop\] 收到信号 \d+/.test(message)
+      || /^\[Teleop\]/.test(message)
+      || /^\[(?:INFO|DEBUG)\]/i.test(message)
+    ) return "info";
+    if (/warning|warn|警告/i.test(message)) return "warn";
+    if (/traceback|exception|\berror\b|failed|失败|异常/i.test(message)) return "error";
+    return "info";
+  }
+
+  private writeLog(level: "info" | "warn" | "error", message: string): void {
+    const prefix = "[RobotBridge]";
+    const output = `${prefix} ${message}`;
+    if (level === "error") console.error(output);
+    else if (level === "warn") console.warn(output);
+    else console.log(output);
+    this.emit("log", { level, message });
   }
 }

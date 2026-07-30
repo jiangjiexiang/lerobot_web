@@ -37,8 +37,15 @@ else:
     )
 
 
+_EMIT_LOCK = threading.Lock()
+
+
 def emit(message: dict) -> None:
-    print(json.dumps(message, separators=(",", ":")), flush=True)
+    """Write one complete JSONL record even when ROS callbacks run concurrently."""
+    payload = json.dumps(message, separators=(",", ":"))
+    with _EMIT_LOCK:
+        sys.stdout.write(payload + "\n")
+        sys.stdout.flush()
 
 
 class LeRobotWebRosBridge(Node):
@@ -54,6 +61,7 @@ class LeRobotWebRosBridge(Node):
         self._leader_subscription = None
         self._follower_subscription = None
         self._capture_sync_enabled = False
+        self._stopping = threading.Event()
 
         sensor_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -212,6 +220,8 @@ class LeRobotWebRosBridge(Node):
         return message
 
     def _publish_observation(self, leader: dict, follower: dict, timestamp: float) -> None:
+        if self._stopping.is_set() or not rclpy.ok():
+            return
         output: dict = {"type": "teleop_observation", "ts": timestamp}
         try:
             self._follower_pub.publish(self._joint_state(follower))
@@ -240,6 +250,8 @@ class LeRobotWebRosBridge(Node):
         if child is None or child.stdout is None:
             return
         for line in child.stdout:
+            if self._stopping.is_set():
+                break
             try:
                 message = json.loads(line)
                 if message.get("type") != "teleop_observation":
@@ -253,6 +265,10 @@ class LeRobotWebRosBridge(Node):
                     )
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 self.get_logger().warning(f"ignored invalid driver output: {exc}")
+            except Exception as exc:
+                if self._stopping.is_set() or not rclpy.ok():
+                    break
+                self.get_logger().error(f"driver output handling failed: {exc}")
         return_code = child.wait()
         self.driver_exit_code = return_code
         if rclpy.ok():
@@ -261,6 +277,8 @@ class LeRobotWebRosBridge(Node):
 
     def _read_web_input(self) -> None:
         for line in sys.stdin:
+            if self._stopping.is_set():
+                break
             try:
                 message = json.loads(line)
                 if message.get("type") == "capture_sync":
@@ -281,6 +299,10 @@ class LeRobotWebRosBridge(Node):
                         self._send_driver_command(joints)
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 self.get_logger().warning(f"ignored invalid web command: {exc}")
+            except Exception as exc:
+                if self._stopping.is_set() or not rclpy.ok():
+                    break
+                self.get_logger().error(f"web command handling failed: {exc}")
 
     def _on_ros_command(self, message: JointTrajectory) -> None:
         if not message.points or self._command_is_stale(message):
@@ -363,6 +385,8 @@ class LeRobotWebRosBridge(Node):
         self._emit_external_observation()
 
     def _publish_camera_from_stdio(self, message: dict) -> None:
+        if self._stopping.is_set() or not rclpy.ok():
+            return
         data = message.get("data")
         camera = message.get("camera")
         if not isinstance(data, str) or camera not in ("camera1", "camera2"):
@@ -382,6 +406,8 @@ class LeRobotWebRosBridge(Node):
         return message.header.stamp.sec + message.header.stamp.nanosec / 1_000_000_000
 
     def _emit_ros_camera(self, camera: str, message: CompressedImage) -> None:
+        if self._stopping.is_set() or not self.args.emit_camera_frames:
+            return
         emit({
             "type": "ros_camera_frame",
             "camera": camera,
@@ -403,7 +429,7 @@ class LeRobotWebRosBridge(Node):
         camera1: CompressedImage,
         camera2: CompressedImage,
     ) -> None:
-        if not self._capture_sync_enabled:
+        if self._stopping.is_set() or not self._capture_sync_enabled:
             return
         leader_joints = self._from_joint_state(leader)
         follower_joints = self._from_joint_state(follower)
@@ -421,8 +447,6 @@ class LeRobotWebRosBridge(Node):
             "sensor_skew_ms": (max(stamps) - min(stamps)) * 1000,
             "leader": leader_joints,
             "follower": follower_joints,
-            "camera": base64.b64encode(bytes(camera1.data)).decode("ascii"),
-            "camera2": base64.b64encode(bytes(camera2.data)).decode("ascii"),
         })
 
     def _emit_external_observation(self) -> None:
@@ -438,6 +462,7 @@ class LeRobotWebRosBridge(Node):
         emit(output)
 
     def destroy_node(self) -> bool:
+        self._stopping.set()
         child = self._child
         if child is not None and child.poll() is None:
             child.send_signal(signal.SIGTERM)
@@ -489,6 +514,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--camera2-topic", default="/camera2/image_raw/compressed")
     parser.add_argument("--capture-sync-slop", type=float, default=0.05)
     parser.add_argument("--capture-sync-queue", type=int, default=20)
+    parser.add_argument(
+        "--emit-camera-frames",
+        action="store_true",
+        help="将外部 ROS 摄像头帧通过 stdout 返回 Robot Server",
+    )
     parser.add_argument(
         "--command-topic",
         default="/follower/joint_trajectory_controller/joint_trajectory",

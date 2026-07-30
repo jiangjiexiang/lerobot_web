@@ -47,6 +47,7 @@ async function main() {
   const controlReceived = new Promise((resolve) => { resolveControl = resolve; });
   const gateway = new RtcGateway({
     enabled: true,
+    videoEnabled: true,
     onControl: (message) => { receivedControl = message; controlCount += 1; resolveControl(); },
     onSafetyStop: () => { safetyStops += 1; },
     onControlLost: () => undefined,
@@ -92,36 +93,71 @@ async function main() {
     assert.ok(camera2Track, "camera2 RTP track must be negotiated");
 
     const sink = new nonstandard.RTCVideoSink(camera1Track);
+    const sink2 = new nonstandard.RTCVideoSink(camera2Track);
     const receivedFrame = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("RTP video frame timeout")), 5000);
-      sink.onframe = ({ frame }) => {
-        clearTimeout(timer);
-        resolve(frame);
-      };
+      const timer = setTimeout(() => reject(new Error("camera1 RTP video frame timeout")), 5000);
+      sink.onframe = ({ frame }) => { clearTimeout(timer); resolve(frame); };
     });
-    const rgba = Buffer.alloc(4 * 4 * 4);
+    const receivedFrame2 = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("camera2 RTP video frame timeout")), 5000);
+      sink2.onframe = ({ frame }) => { clearTimeout(timer); resolve(frame); };
+    });
+    const width = 4;
+    const height = 4;
+    const rgba = Buffer.alloc(width * height * 4);
     for (let offset = 0; offset < rgba.length; offset += 4) {
       rgba[offset] = 40;
       rgba[offset + 1] = 120;
       rgba[offset + 2] = 220;
       rgba[offset + 3] = 255;
     }
-    const jpegFrame = jpeg.encode({ data: rgba, width: 4, height: 4 }, 90).data;
+    const jpegFrame = jpeg.encode({ data: rgba, width, height }, 80).data;
     const transportFrame = Buffer.alloc(9 + jpegFrame.length);
     transportFrame.writeUInt8(1, 0);
     jpegFrame.copy(transportFrame, 9);
+    const transportFrame2 = Buffer.from(transportFrame);
+    transportFrame2.writeUInt8(2, 0);
+    const videoStartedAt = performance.now();
     gateway.broadcastFrame(transportFrame);
-    const frame = await receivedFrame;
-    assert.strictEqual(frame.width, 4);
-    assert.strictEqual(frame.height, 4);
+    gateway.broadcastFrame(transportFrame2);
+    const [frame, frame2] = await Promise.all([receivedFrame, receivedFrame2]);
+    const localVideoLatencyMs = performance.now() - videoStartedAt;
+    assert.strictEqual(frame.width, width);
+    assert.strictEqual(frame.height, height);
+    assert.strictEqual(frame2.width, width);
+    assert.strictEqual(frame2.height, height);
+    assert.ok(localVideoLatencyMs < 1000, `dual-camera local RTP latency too high: ${localVideoLatencyMs.toFixed(1)}ms`);
     sink.stop();
+    sink2.stop();
     safety.send(JSON.stringify({ type: "stop" }));
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.strictEqual(safetyStops, 1);
-    console.log("WebRTC control/state/RTP video integration: OK");
+    console.log(`WebRTC control/state/dual RTP video integration: OK (${localVideoLatencyMs.toFixed(1)}ms local pipeline)`);
   } finally {
     client.close();
     await gateway.close();
+  }
+  const hybridGateway = new RtcGateway({
+    enabled: true,
+    videoEnabled: false,
+    onControl: () => undefined,
+    onSafetyStop: () => undefined,
+    onControlLost: () => undefined,
+  });
+  const hybridClient = new RTCPeerConnection();
+  hybridClient.createDataChannel("robot-state-v1", { ordered: false, maxRetransmits: 0 });
+  try {
+    const offer = await hybridClient.createOffer();
+    await hybridClient.setLocalDescription(offer);
+    await waitForIceGathering(hybridClient);
+    const answer = await hybridGateway.acceptOffer(hybridClient.localDescription);
+    assert.deepStrictEqual(answer.videoMids, { camera1: "", camera2: "" });
+    await hybridClient.setRemoteDescription(answer);
+    assert.strictEqual(hybridGateway.isVideoEnabled(), false);
+    console.log("WebRTC DataChannel + direct MJPEG hybrid mode: OK");
+  } finally {
+    hybridClient.close();
+    await hybridGateway.close();
   }
   // @roamhq/wrtc keeps RTCVideoSource native handles alive after all peers close.
   // Explicit process termination avoids its teardown crash while preserving all

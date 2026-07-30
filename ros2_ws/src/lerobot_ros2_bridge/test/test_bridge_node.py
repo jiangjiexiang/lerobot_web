@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import selectors
 import signal
@@ -7,13 +8,14 @@ import sys
 import time
 import unittest
 from unittest.mock import patch
+import threading
 
 import rclpy
 from sensor_msgs.msg import CompressedImage, JointState
 from trajectory_msgs.msg import JointTrajectory
 from trajectory_msgs.msg import JointTrajectoryPoint
 
-from lerobot_ros2_bridge.web_bridge import LeRobotWebRosBridge, parse_args
+from lerobot_ros2_bridge.web_bridge import LeRobotWebRosBridge, emit, parse_args
 
 
 FOLLOWER = {
@@ -57,6 +59,22 @@ class BridgeNodeTests(unittest.TestCase):
             ]
         )
         return LeRobotWebRosBridge(args, start_stdio_thread=False)
+
+    def test_concurrent_emit_keeps_json_lines_intact(self):
+        output = io.StringIO()
+        payload = "x" * 10000
+        with patch("sys.stdout", output):
+            threads = [
+                threading.Thread(target=emit, args=({"type": "frame", "id": index, "data": payload},))
+                for index in range(8)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        records = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual({record["id"] for record in records}, set(range(8)))
+        self.assertTrue(all(record["data"] == payload for record in records))
 
     def test_missing_leader_does_not_drop_follower_observation(self):
         node = self.make_node()
@@ -253,6 +271,8 @@ class BridgeNodeTests(unittest.TestCase):
             self.assertIsNotNone(capture, f"bridge output: {output_lines}")
             self.assertEqual(capture["leader"], {"vendor_joint": 0.5})
             self.assertLess(capture["sensor_skew_ms"], 1.0)
+            self.assertNotIn("camera", capture)
+            self.assertNotIn("camera2", capture)
         finally:
             probe.destroy_node()
             child.send_signal(signal.SIGTERM)

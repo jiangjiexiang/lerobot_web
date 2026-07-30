@@ -10,6 +10,7 @@ import { execSync, execFile, execFileSync, spawn, ChildProcess } from "child_pro
 import { RobotBridge, BridgeMessage } from "./robotBridge";
 import { MJPEGStreamManager } from "./streams";
 import { RtcGateway } from "./rtcGateway";
+import { CameraBridgeMessage, GStreamerCameraBridge } from "./gstreamerCameraBridge";
 
 // 配置
 const PORT = parseInt(process.env.PORT || "43127");
@@ -20,8 +21,9 @@ const CONFIGURED_COMMAND_SOURCE = process.env.ROS2_COMMAND_SOURCE || "";
 const LEGACY_TELEOP_SCRIPT = path.join(BRIDGE_DIR, "teleop_mujoco.py");
 const ROS2_BRIDGE_SCRIPT = process.env.ROS2_BRIDGE_SCRIPT
   || path.join(__dirname, "../../ros2_ws/src/lerobot_ros2_bridge/lerobot_ros2_bridge/web_bridge.py");
+const ROS2_IDLE_TOPICS_SCRIPT = process.env.ROS2_IDLE_TOPICS_SCRIPT
+  || path.join(__dirname, "../../ros2_ws/src/lerobot_ros2_bridge/lerobot_ros2_bridge/idle_topics.py");
 const TELEOP_SCRIPT = CONTROL_BACKEND === "legacy" ? LEGACY_TELEOP_SCRIPT : ROS2_BRIDGE_SCRIPT;
-const CAMERA_SCRIPT = path.join(BRIDGE_DIR, "camera_stream.py");
 const RECORDER_SCRIPT = path.join(BRIDGE_DIR, "dataset_recorder.py");
 const DATASET_CATALOG_SCRIPT = path.join(BRIDGE_DIR, "dataset_catalog.py");
 const ROSBAG_QOS_CONFIG = process.env.ROSBAG_QOS_CONFIG
@@ -44,6 +46,9 @@ const DATASET_STREAMING_ENCODING = process.env.DATASET_STREAMING_ENCODING || "au
 const DATASET_VIDEO_CODEC = process.env.DATASET_VIDEO_CODEC || "auto";
 const DEFAULT_STREAM_FPS = parseInt(process.env.STREAM_FPS || "0", 10);
 const ENABLE_WEBRTC = process.env.ENABLE_WEBRTC !== "0" && process.env.ENABLE_WEBRTC !== "false";
+const ENABLE_WEBRTC_VIDEO = process.env.ENABLE_WEBRTC_VIDEO === "1" || process.env.ENABLE_WEBRTC_VIDEO === "true";
+const RTC_VIDEO_FPS = parseInt(process.env.RTC_VIDEO_FPS || "15", 10);
+const RTC_VIDEO_BITRATE = parseInt(process.env.RTC_VIDEO_BITRATE || "1500000", 10);
 const RTC_ICE_SERVERS = [
   ...(process.env.RTC_STUN_URL ? [{ urls: process.env.RTC_STUN_URL }] : []),
   ...(process.env.RTC_TURN_URL ? [{
@@ -53,6 +58,39 @@ const RTC_ICE_SERVERS = [
   }] : []),
 ];
 const TRAINING_ROOT = path.join(DATASET_ROOT, ".lerobot-web", "training");
+const RUNTIME_LOG_ROOT = path.join(DATASET_ROOT, ".lerobot-web", "logs");
+const DATASET_TRASH_ROOT = path.join(DATASET_ROOT, ".lerobot-web", "trash");
+
+type RuntimeLogLevel = "info" | "warn" | "error";
+type RuntimeLogSource = "teleop" | "recorder" | "system";
+
+function localDateKey(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function localLogSessionKey(date = new Date()): string {
+  const time = [date.getHours(), date.getMinutes(), date.getSeconds()]
+    .map((value) => String(value).padStart(2, "0"))
+    .join("-");
+  return `${localDateKey(date)}_${time}_${process.pid}`;
+}
+
+const RUNTIME_LOG_SESSION_ID = localLogSessionKey();
+
+function persistRuntimeLog(source: RuntimeLogSource, level: RuntimeLogLevel, message: string): void {
+  try {
+    fs.mkdirSync(RUNTIME_LOG_ROOT, { recursive: true });
+    const entry = JSON.stringify({ timestamp: new Date().toISOString(), source, level, message });
+    fs.appendFileSync(path.join(RUNTIME_LOG_ROOT, `${RUNTIME_LOG_SESSION_ID}.jsonl`), `${entry}\n`, "utf-8");
+  } catch (error) {
+    console.error("[Logs] 写入本地日志失败:", error);
+  }
+}
+
+persistRuntimeLog("system", "info", `Robot Server 启动，会话 ${RUNTIME_LOG_SESSION_ID}`);
 
 function detectUsbCameraIndices(): number[] {
   try {
@@ -106,7 +144,9 @@ const streamManager = new MJPEGStreamManager();
 
 // 桥接状态
 let bridge: RobotBridge | null = null;
+let idleRosTopics: RobotBridge | null = null;
 let stopping = false;
+let shuttingDown = false;
 let remoteLeaderActive = false;
 let activeCommandSource: "leader" | "web" | "ros" | null = null;
 let latestObservation: BridgeMessage | null = null;
@@ -114,6 +154,23 @@ let latestObservationAt = 0;
 const clients = new Set<WebSocket>();
 const streamClients = new Set<WebSocket>();
 let controlDisconnectTimer: NodeJS.Timeout | null = null;
+
+function startIdleRosTopics(): void {
+  if (CONTROL_BACKEND !== "ros2" || idleRosTopics?.isRunning()) return;
+  const idle = new RobotBridge(ROS2_IDLE_TOPICS_SCRIPT, [], CONTROL_PYTHON_PATH);
+  idleRosTopics = idle;
+  idle.on("exit", (code) => {
+    if (idleRosTopics === idle) idleRosTopics = null;
+    if (!shuttingDown && code !== 0) {
+      console.error(`[ROS2] 空闲话题节点异常退出 (code=${code})`);
+    }
+  });
+  idle.on("error", (err) => console.error("[ROS2] 空闲话题节点启动失败:", err));
+  idle.start();
+  console.log("[ROS2] 已启动空闲话题: /follower/joint_states, /camera1/image_raw/compressed, /camera2/image_raw/compressed");
+}
+
+startIdleRosTopics();
 
 function stopTeleop(): boolean {
   if (!bridge || !bridge.isRunning()) return false;
@@ -126,7 +183,10 @@ function stopTeleop(): boolean {
 
 const rtcGateway = new RtcGateway({
   enabled: ENABLE_WEBRTC,
+  videoEnabled: ENABLE_WEBRTC_VIDEO,
   iceServers: RTC_ICE_SERVERS,
+  maxVideoFps: RTC_VIDEO_FPS,
+  maxVideoBitrate: RTC_VIDEO_BITRATE,
   onControl: (message) => {
     if (bridge?.isRunning() && remoteLeaderActive && !stopping) {
       bridge.send(message as BridgeMessage);
@@ -140,13 +200,14 @@ const rtcGateway = new RtcGateway({
   },
 });
 
-// 摄像头是可选资源：默认关闭，避免服务启动时常驻 OpenCV 进程并占用 USB 摄像头。
-let cameraBridge: RobotBridge | null = null;
+// 摄像头是可选资源：关闭时不启动 GStreamer，也不占用 USB 摄像头。
+let cameraBridge: GStreamerCameraBridge | null = null;
 let activeCameraIndex = -1;
 let cameraLastFrameAt = 0;
 let cameraError: string | null = null;
 let cameraMetrics: Record<string, unknown> = {};
 let latestCameraFrame: Buffer | null = null;
+let cameraLocalFrameAt = 0;
 function startCamera(index: number): void {
   if (!ENABLE_CAMERA || index < 0) return;
   if (cameraBridge) cameraBridge.stop();
@@ -154,17 +215,20 @@ function startCamera(index: number): void {
   cameraLastFrameAt = 0;
   cameraError = null;
   cameraMetrics = {};
-  cameraBridge = new RobotBridge(CAMERA_SCRIPT, ["--camera-index", String(index), "--fps", String(CAMERA_FPS), "--width", String(CAMERA_WIDTH), "--height", String(CAMERA_HEIGHT)], PYTHON_PATH);
-  cameraBridge.on("message", (msg: BridgeMessage) => {
+  cameraBridge = new GStreamerCameraBridge(index, CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_FPS);
+  cameraBridge.on("message", (msg: CameraBridgeMessage) => {
     if (msg.type === "camera_frame" && msg.data) {
       cameraLastFrameAt = Date.now();
-      const jpeg = Buffer.from(msg.data, "base64");
+      const jpeg = msg.data;
       latestCameraFrame = jpeg;
+      cameraLocalFrameAt = Date.now();
+      streamManager.updateFrame("camera", jpeg);
+      broadcastBinaryFrame(STREAM_TYPE_CAMERA, typeof msg.ts === "number" ? msg.ts : Date.now() / 1000, jpeg);
       if (bridge?.isRunning()) {
-        bridge.send({ type: "ros_camera_frame", camera: "camera1", data: msg.data, ts: msg.ts });
-      } else {
-        streamManager.updateFrame("camera", jpeg);
-        broadcastBinaryFrame(STREAM_TYPE_CAMERA, typeof msg.ts === "number" ? msg.ts : Date.now() / 1000, jpeg);
+        bridge.send({ type: "ros_camera_frame", camera: "camera1", data: jpeg.toString("base64"), ts: msg.ts });
+      }
+      if (!bridge?.isRunning() && idleRosTopics?.isRunning()) {
+        idleRosTopics.send({ type: "ros_camera_frame", camera: "camera1", data: jpeg.toString("base64"), ts: msg.ts });
       }
     } else if (msg.type === "camera_error") {
       cameraError = String(msg.error || "摄像头不可用");
@@ -181,12 +245,13 @@ function startCamera(index: number): void {
 }
 
 // 第二个摄像头（可选）
-let cameraBridge2: RobotBridge | null = null;
+let cameraBridge2: GStreamerCameraBridge | null = null;
 let activeCameraIndex2 = -1;
 let camera2LastFrameAt = 0;
 let camera2Error: string | null = null;
 let camera2Metrics: Record<string, unknown> = {};
 let latestCamera2Frame: Buffer | null = null;
+let camera2LocalFrameAt = 0;
 function startCamera2(index: number): void {
   if (!ENABLE_CAMERA || index < 0) return;
   if (cameraBridge2) cameraBridge2.stop();
@@ -194,17 +259,20 @@ function startCamera2(index: number): void {
   camera2LastFrameAt = 0;
   camera2Error = null;
   camera2Metrics = {};
-  cameraBridge2 = new RobotBridge(CAMERA_SCRIPT, ["--camera-index", String(index), "--fps", String(CAMERA_FPS), "--width", String(CAMERA_WIDTH), "--height", String(CAMERA_HEIGHT)], PYTHON_PATH);
-  cameraBridge2.on("message", (msg: BridgeMessage) => {
+  cameraBridge2 = new GStreamerCameraBridge(index, CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_FPS);
+  cameraBridge2.on("message", (msg: CameraBridgeMessage) => {
     if (msg.type === "camera_frame" && msg.data) {
       camera2LastFrameAt = Date.now();
-      const jpeg = Buffer.from(msg.data, "base64");
+      const jpeg = msg.data;
       latestCamera2Frame = jpeg;
+      camera2LocalFrameAt = Date.now();
+      streamManager.updateFrame("camera2", jpeg);
+      broadcastBinaryFrame(STREAM_TYPE_CAMERA2, typeof msg.ts === "number" ? msg.ts : Date.now() / 1000, jpeg);
       if (bridge?.isRunning()) {
-        bridge.send({ type: "ros_camera_frame", camera: "camera2", data: msg.data, ts: msg.ts });
-      } else {
-        streamManager.updateFrame("camera2", jpeg);
-        broadcastBinaryFrame(STREAM_TYPE_CAMERA2, typeof msg.ts === "number" ? msg.ts : Date.now() / 1000, jpeg);
+        bridge.send({ type: "ros_camera_frame", camera: "camera2", data: jpeg.toString("base64"), ts: msg.ts });
+      }
+      if (!bridge?.isRunning() && idleRosTopics?.isRunning()) {
+        idleRosTopics.send({ type: "ros_camera_frame", camera: "camera2", data: jpeg.toString("base64"), ts: msg.ts });
       }
     } else if (msg.type === "camera_error") {
       camera2Error = String(msg.error || "摄像头不可用");
@@ -368,22 +436,45 @@ function datasetPath(name: string): string {
   return path.join(DATASET_ROOT, name);
 }
 
-function runDatasetCatalog(command: "list" | "detail" | "quality", dataset?: string): Promise<Record<string, unknown>> {
+const datasetCatalogCache = new Map<string, { expiresAt: number; value: Record<string, unknown> }>();
+const datasetCatalogPending = new Map<string, Promise<Record<string, unknown>>>();
+
+function clearDatasetCatalogCache(dataset?: string): void {
+  for (const key of datasetCatalogCache.keys()) {
+    if (!dataset || key === "list:" || key.endsWith(`:${dataset}`)) datasetCatalogCache.delete(key);
+  }
+}
+
+function runDatasetCatalog(command: "list" | "detail" | "quality", dataset?: string, refresh = false): Promise<Record<string, unknown>> {
+  const cacheKey = `${command}:${dataset || ""}`;
+  const cached = datasetCatalogCache.get(cacheKey);
+  if (!refresh && cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.value);
+  const pending = datasetCatalogPending.get(cacheKey);
+  if (!refresh && pending) return pending;
   const args = [DATASET_CATALOG_SCRIPT, command, "--root", DATASET_ROOT];
   if (dataset) args.push("--dataset", dataset);
-  return new Promise((resolve, reject) => {
+  const request = new Promise<Record<string, unknown>>((resolve, reject) => {
     execFile(PYTHON_PATH, args, { maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
         reject(new Error(stderr.trim().split("\n").pop() || error.message));
         return;
       }
       try {
-        resolve(JSON.parse(stdout));
+        const value = JSON.parse(stdout) as Record<string, unknown>;
+        datasetCatalogCache.set(cacheKey, { expiresAt: Date.now() + (command === "list" ? 10_000 : 30_000), value });
+        resolve(value);
       } catch {
         reject(new Error("数据目录返回了无效响应"));
       }
     });
   });
+  datasetCatalogPending.set(cacheKey, request);
+  void request.then(() => {
+    if (datasetCatalogPending.get(cacheKey) === request) datasetCatalogPending.delete(cacheKey);
+  }, () => {
+    if (datasetCatalogPending.get(cacheKey) === request) datasetCatalogPending.delete(cacheKey);
+  });
+  return request;
 }
 
 interface EpisodeReview {
@@ -1322,11 +1413,14 @@ function buildReview(body: Record<string, unknown>, previous?: EpisodeReview): E
 function recordCaptureSample(message: BridgeMessage): void {
   if (recordingStatus.state !== "recording" || !recorder?.isRunning() || recorderFramePending) return;
   const now = Date.now();
-  if (now < nextRecorderFrameAt || !message.camera || !message.camera2) return;
+  if (now < nextRecorderFrameAt || !latestCameraFrame || !latestCamera2Frame) return;
   if (
     !message.leader
     || !message.follower
     || Number(message.sensor_skew_ms || 0) > RECORDING_MAX_CAMERA_SKEW_MS
+    || now - cameraLastFrameAt > RECORDING_MAX_SENSOR_AGE_MS
+    || now - camera2LastFrameAt > RECORDING_MAX_SENSOR_AGE_MS
+    || Math.abs(cameraLastFrameAt - camera2LastFrameAt) > RECORDING_MAX_CAMERA_SKEW_MS
   ) return;
 
   recorderFramePending = true;
@@ -1335,8 +1429,8 @@ function recordCaptureSample(message: BridgeMessage): void {
     type: "record_frame",
     leader: message.leader,
     follower: message.follower,
-    camera: message.camera,
-    camera2: message.camera2,
+    camera: latestCameraFrame.toString("base64"),
+    camera2: latestCamera2Frame.toString("base64"),
   });
 }
 
@@ -1344,11 +1438,91 @@ app.get("/api/recording/status", (req, res) => {
   res.json({ ok: true, ...recordingStatus, root: DATASET_ROOT });
 });
 
-app.get("/api/datasets", async (req, res) => {
+app.get("/api/logs", (_req, res) => {
   try {
-    res.json({ ok: true, ...await runDatasetCatalog("list") });
+    fs.mkdirSync(RUNTIME_LOG_ROOT, { recursive: true });
+    const files = fs.readdirSync(RUNTIME_LOG_ROOT)
+      .filter((name) => /^\d{4}-\d{2}-\d{2}(?:_\d{2}-\d{2}-\d{2}_\d+)?\.jsonl$/.test(name))
+      .map((name) => {
+        const file = path.join(RUNTIME_LOG_ROOT, name);
+        const content = fs.readFileSync(file, "utf-8");
+        const id = name.slice(0, -".jsonl".length);
+        const firstEntry = content.split("\n").find(Boolean);
+        let startedAt = fs.statSync(file).birthtime.toISOString();
+        try {
+          const parsed = firstEntry ? JSON.parse(firstEntry) : null;
+          if (typeof parsed?.timestamp === "string") startedAt = parsed.timestamp;
+        } catch { /* retain filesystem timestamp for legacy files */ }
+        return {
+          id,
+          date: name.slice(0, 10),
+          startedAt,
+          current: id === RUNTIME_LOG_SESSION_ID,
+          legacy: /^\d{4}-\d{2}-\d{2}$/.test(id),
+          lines: content.split("\n").filter(Boolean).length,
+          bytes: fs.statSync(file).size,
+        };
+      })
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+    res.json({ ok: true, root: RUNTIME_LOG_ROOT, currentSession: RUNTIME_LOG_SESSION_ID, files });
   } catch (error) {
     res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get("/api/logs/:session", (req, res) => {
+  const session = String(req.params.session || "");
+  if (!/^\d{4}-\d{2}-\d{2}(?:_\d{2}-\d{2}-\d{2}_\d+)?$/.test(session)) {
+    res.status(400).json({ ok: false, error: "日志会话无效" });
+    return;
+  }
+  const file = path.join(RUNTIME_LOG_ROOT, `${session}.jsonl`);
+  if (!fs.existsSync(file)) {
+    res.status(404).json({ ok: false, error: "该日期没有日志" });
+    return;
+  }
+  try {
+    const entries = fs.readFileSync(file, "utf-8").split("\n").filter(Boolean).flatMap((line) => {
+      try { return [JSON.parse(line)]; } catch { return []; }
+    }).reverse();
+    res.json({ ok: true, session, entries });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get("/api/datasets", async (req, res) => {
+  try {
+    res.json({ ok: true, ...await runDatasetCatalog("list", undefined, req.query.refresh === "1") });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.delete("/api/datasets/:dataset", (req, res) => {
+  const dataset = cleanDatasetName(req.params.dataset);
+  const confirmation = cleanShortText(req.body?.confirmation, 120);
+  if (!dataset || confirmation !== dataset) {
+    res.status(400).json({ ok: false, error: "请输入完整数据集名称确认删除" });
+    return;
+  }
+  if (recordingStatus.dataset === dataset && recordingStatus.state !== "idle" && recordingStatus.state !== "error") {
+    res.status(409).json({ ok: false, error: "该数据集正在录制，请先停止录制" });
+    return;
+  }
+  try {
+    const source = fs.realpathSync(datasetPath(dataset));
+    if (path.dirname(source) !== fs.realpathSync(DATASET_ROOT)) throw new Error("数据集路径无效");
+    fs.mkdirSync(DATASET_TRASH_ROOT, { recursive: true });
+    const suffix = new Date().toISOString().replace(/[:.]/g, "-");
+    const destination = path.join(DATASET_TRASH_ROOT, `${dataset}-${suffix}`);
+    fs.renameSync(source, destination);
+    clearDatasetCatalogCache(dataset);
+    persistRuntimeLog("system", "warn", `数据集 ${dataset} 已移入回收目录: ${destination}`);
+    res.json({ ok: true, dataset, recoverable: true, trashPath: destination });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(message.includes("ENOENT") ? 404 : 400).json({ ok: false, error: message });
   }
 });
 
@@ -1359,7 +1533,7 @@ app.get("/api/datasets/:dataset", async (req, res) => {
     return;
   }
   try {
-    const detail = await runDatasetCatalog("detail", dataset);
+    const detail = await runDatasetCatalog("detail", dataset, req.query.refresh === "1");
     const episodes = Array.isArray(detail.episodes) ? detail.episodes.map((episode) => {
       const item = episode as Record<string, unknown>;
       const videos = item.videos && typeof item.videos === "object" ? Object.fromEntries(
@@ -1417,6 +1591,7 @@ app.patch("/api/datasets/:dataset/episodes/:episode/review", (req, res) => {
     const review = buildReview(req.body, reviews.episodes[String(episode)]);
     reviews.episodes[String(episode)] = review;
     writeReviews(root, reviews);
+    clearDatasetCatalogCache(dataset);
     appendAudit(root, { action: "review.update", actor: review.reviewer || "本地用户", dataset, episodes: [episode], status: review.status, tags: review.tags });
     res.json({ ok: true, review });
   } catch (error) {
@@ -1453,6 +1628,7 @@ app.patch("/api/datasets/:dataset/reviews/batch", (req, res) => {
       reviews.episodes[String(episode)] = saved[String(episode)];
     }
     writeReviews(root, reviews);
+    clearDatasetCatalogCache(dataset);
     appendAudit(root, { action: "review.batch", actor: cleanShortText(req.body.reviewer, 80) || "本地用户", dataset, episodes: episodeIds, status: req.body.status, tags: cleanStringList(req.body.tags, 20, 40) });
     res.json({ ok: true, count: episodeIds.length, reviews: saved });
   } catch (error) {
@@ -1469,6 +1645,27 @@ app.get("/api/datasets/:dataset/collections", (req, res) => {
     res.json({ ok: true, collections: readCollections(root) });
   } catch {
     res.status(404).json({ ok: false, error: `找不到数据集: ${dataset}` });
+  }
+});
+
+app.delete("/api/datasets/:dataset/collections/:collection", (req, res) => {
+  const dataset = cleanDatasetName(req.params.dataset);
+  const collection = cleanShortText(req.params.collection, 80);
+  if (!dataset || !/^[A-Za-z0-9_-]+$/.test(collection)) {
+    res.status(400).json({ ok: false, error: "数据集或训练选集无效" });
+    return;
+  }
+  try {
+    const root = fs.realpathSync(datasetPath(dataset));
+    const directory = collectionsDirectory(root);
+    const file = fs.realpathSync(path.join(directory, `${collection}.json`));
+    if (path.dirname(file) !== fs.realpathSync(directory)) throw new Error("训练选集路径无效");
+    fs.unlinkSync(file);
+    appendAudit(root, { action: "collection.delete", actor: cleanShortText(req.body?.actor, 80) || "本地用户", dataset, collection });
+    res.json({ ok: true, deleted: collection });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(message.includes("ENOENT") ? 404 : 400).json({ ok: false, error: message });
   }
 });
 
@@ -1510,6 +1707,7 @@ app.post("/api/datasets/:dataset/collections", (req, res) => {
     const temporary = `${target}.${process.pid}.tmp`;
     fs.writeFileSync(temporary, JSON.stringify(collection, null, 2) + "\n", "utf-8");
     fs.renameSync(temporary, target);
+    clearDatasetCatalogCache(dataset);
     appendAudit(root, { action: "collection.publish", actor: cleanShortText(req.body.actor, 80) || "本地用户", dataset, collection: id, episodes: episodeIds });
     res.status(201).json({ ok: true, collection, path: path.relative(root, target) });
   } catch (error) {
@@ -2118,6 +2316,11 @@ app.post("/api/recording/start", (req, res) => {
     "--streaming-encoding", DATASET_STREAMING_ENCODING,
     ...(DATASET_VIDEO_CODEC ? ["--vcodec", DATASET_VIDEO_CODEC] : []),
   ], PYTHON_PATH);
+  startedRecorder.on("log", ({ level, message }) => {
+    const normalizedLevel: RuntimeLogLevel = level === "error" || level === "stderr" ? "error" : level === "warn" ? "warn" : "info";
+    persistRuntimeLog("recorder", normalizedLevel, message);
+    broadcastControl({ type: "bridge_log", source: "recorder", level: normalizedLevel, message });
+  });
   recorder = startedRecorder;
   recorderFramePending = false;
   nextRecorderFrameAt = 0;
@@ -2163,6 +2366,7 @@ app.post("/api/recording/start", (req, res) => {
         break;
       case "episode_saved":
         recorderFramePending = false;
+        clearDatasetCatalogCache(dataset);
         recordingStatus = {
           ...recordingStatus,
           state: "idle",
@@ -2301,7 +2505,7 @@ app.get("/api/self-check", (req, res) => {
 
   const cameraStatus = (
     index: number,
-    child: RobotBridge | null,
+    child: { isRunning(): boolean } | null,
     lastFrameAt: number,
     error: string | null,
     metrics: Record<string, unknown>,
@@ -2378,12 +2582,13 @@ app.post("/api/start", (req, res) => {
     stream_fps = DEFAULT_STREAM_FPS,
     viewer = false,
     remote_leader = false,
+    command_source,
     camera_index = -1,
     camera_fps = 15,
   } = req.body;
   const commandSource = (
     CONTROL_BACKEND === "ros2"
-      ? CONFIGURED_COMMAND_SOURCE || (remote_leader ? "web" : "leader")
+      ? CONFIGURED_COMMAND_SOURCE || command_source || (remote_leader ? "web" : "leader")
       : remote_leader ? "web" : "leader"
   ) as "leader" | "web" | "ros";
   if (!["leader", "web", "ros"].includes(commandSource)) {
@@ -2429,6 +2634,7 @@ app.post("/api/start", (req, res) => {
   if (CONTROL_BACKEND === "ros2") {
     args.unshift("--driver", ROS2_DRIVER);
     args.push("--command-source", commandSource);
+    if (!ENABLE_CAMERA) args.push("--emit-camera-frames");
   }
   if (viewer) args.push("--viewer");
   if (remote_leader) args.push("--remote-leader");
@@ -2436,6 +2642,11 @@ app.post("/api/start", (req, res) => {
   console.log(`[Server] 启动 ${CONTROL_BACKEND} 控制桥: ${CONTROL_PYTHON_PATH} ${TELEOP_SCRIPT} ${args.join(" ")}`);
 
   const startedBridge = new RobotBridge(TELEOP_SCRIPT, args, CONTROL_PYTHON_PATH);
+  startedBridge.on("log", ({ level, message }) => {
+    const normalizedLevel: RuntimeLogLevel = level === "error" || level === "stderr" ? "error" : level === "warn" ? "warn" : "info";
+    persistRuntimeLog("teleop", normalizedLevel, message);
+    broadcastControl({ type: "bridge_log", source: "teleop", level: normalizedLevel, message });
+  });
   bridge = startedBridge;
   stopping = false;
   activeCommandSource = commandSource;
@@ -2462,13 +2673,17 @@ app.post("/api/start", (req, res) => {
           if (msg.camera === "camera1") {
             latestCameraFrame = jpeg;
             cameraLastFrameAt = Date.now();
-            streamManager.updateFrame("camera", jpeg);
-            broadcastBinaryFrame(STREAM_TYPE_CAMERA, timestamp, jpeg);
+            if (Date.now() - cameraLocalFrameAt > 100) {
+              streamManager.updateFrame("camera", jpeg);
+              broadcastBinaryFrame(STREAM_TYPE_CAMERA, timestamp, jpeg);
+            }
           } else {
             latestCamera2Frame = jpeg;
             camera2LastFrameAt = Date.now();
-            streamManager.updateFrame("camera2", jpeg);
-            broadcastBinaryFrame(STREAM_TYPE_CAMERA2, timestamp, jpeg);
+            if (Date.now() - camera2LocalFrameAt > 100) {
+              streamManager.updateFrame("camera2", jpeg);
+              broadcastBinaryFrame(STREAM_TYPE_CAMERA2, timestamp, jpeg);
+            }
           }
         }
         break;
@@ -2534,6 +2749,7 @@ app.get("/api/status", (req, res) => {
 app.get("/api/rtc/config", (_req, res) => {
   res.json({
     enabled: rtcGateway.isEnabled(),
+    videoEnabled: rtcGateway.isVideoEnabled(),
     iceServers: RTC_ICE_SERVERS,
     channels: {
       control: "robot-control-v1",
@@ -2720,12 +2936,12 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`[Robot Server] API: /api/ports /api/start /api/stop /api/status`);
 });
 
-let shuttingDown = false;
 function shutdown(): void {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log("[Robot Server] 退出中...");
   if (bridge) bridge.stop();
+  if (idleRosTopics) idleRosTopics.stop();
   void rtcGateway.close();
   if (cameraBridge) cameraBridge.stop();
   if (cameraBridge2) cameraBridge2.stop();
