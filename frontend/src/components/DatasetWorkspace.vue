@@ -1,11 +1,24 @@
 <template>
   <main class="workspace">
+    <div class="data-platform">
+      <aside class="data-sidebar" aria-label="数据管理功能">
+        <div class="data-sidebar-title"><strong>数据管理</strong></div>
+        <nav>
+          <button :class="{ active: dataSection === 'datasets' }" @click="openSection('datasets')"><span>▤</span>数据资产</button>
+          <button :class="{ active: dataSection === 'viewer' }" @click="openSection('viewer')"><span>◧</span>数据查看</button>
+          <button :class="{ active: dataSection === 'review' }" @click="openSection('review')"><span>✓</span>质量审核 <i v-if="pendingReviewCount">{{ pendingReviewCount }}</i></button>
+          <button :class="{ active: dataSection === 'collections' }" @click="openSection('collections')"><span>▱</span>训练选集</button>
+          <button :class="{ active: dataSection === 'audit' }" @click="openSection('audit')"><span>☷</span>操作记录</button>
+        </nav>
+        <div class="data-sidebar-foot"><span :class="{ demo: demoMode }">{{ demoMode ? '演示目录' : '本地目录' }}</span><button @click="loadDatasets(true)" title="刷新数据目录">↻</button></div>
+      </aside>
+      <section class="data-content">
     <div v-if="error" class="workspace-error">{{ error }}<button @click="loadDatasets(true)">重试</button></div>
     <div v-if="loading && datasets.length === 0" class="catalog-skeleton"><i v-for="item in 3" :key="item"></i></div>
     <div v-else-if="!loading && datasets.length === 0" class="empty">尚无已保存的数据集</div>
 
     <template v-else>
-      <section v-if="!selectedDataset" class="manager-view">
+      <section v-if="dataSection === 'datasets' && !selectedDataset" class="manager-view">
         <nav class="project-tabs" aria-label="项目筛选">
           <span>选择项目：</span><button :class="{ active: projectFilter === 'all' }" @click="projectFilter = 'all'">全部项目</button><button :class="{ active: projectFilter === 'captured' }" @click="projectFilter = 'captured'">采集数据</button><button :class="{ active: projectFilter === 'pending' }" @click="projectFilter = 'pending'">待审核</button><button :class="{ active: projectFilter === 'published' }" @click="projectFilter = 'published'">已发布</button>
           <span v-if="demoMode" class="demo-badge">演示数据</span><span class="catalog-root" :title="root">{{ root || "本地数据目录" }}</span>
@@ -37,11 +50,11 @@
         <div class="manager-actions"><button title="刷新目录" @click="loadDatasets(true)">↻<span>刷新</span></button><button :disabled="!selectedDatasetNames.size" @click="selectedDatasetNames.clear()">×<span>取消选择</span></button><button :disabled="!selectedDatasetNames.size" @click="deleteSelectedDataset">⌫<span>删除</span></button></div>
       </section>
 
-      <template v-else>
+      <template v-else-if="selectedDataset">
       <div class="dataset-context">
         <button @click="closeDataset">← 返回列表</button>
         <div><strong>{{ selectedDataset.name }}</strong><small>{{ selectedDataset.robotType || "机器人数据" }} · {{ selectedDataset.totalEpisodes }} 段采集 · {{ selectedDataset.cameras.length }} 路相机</small></div>
-        <div class="context-actions"><span :class="{ loading: detailLoading }">{{ detailLoading ? "正在读取…" : "读取完成" }}</span><button class="danger-button" @click="openDeleteDataset(selectedDataset)">删除</button></div>
+        <div class="context-actions"><span :class="{ loading: detailLoading }">{{ detailLoading ? "正在读取…" : "读取完成" }}</span></div>
       </div>
       <div class="data-layout">
 
@@ -56,10 +69,10 @@
             <select v-model="qualityFilter" aria-label="质量状态"><option value="all">全部质量</option><option value="issues">有问题</option><option value="clean">规则通过</option></select>
             <select v-model="sort" aria-label="排序"><option value="episode-asc">编号升序</option><option value="episode-desc">编号降序</option><option value="quality-asc">质量较差优先</option><option value="updated-desc">最近审核</option></select>
           </div>
-          <label class="select-all"><input type="checkbox" :checked="allFilteredSelected" @change="toggleAllFiltered" /> 选择当前结果</label>
+          <label v-if="dataSection === 'review'" class="select-all"><input type="checkbox" :checked="allFilteredSelected" @change="toggleAllFiltered" /> 选择当前结果</label>
         </div>
 
-        <div v-if="selectedIds.size" class="batch-bar">
+        <div v-if="dataSection === 'review' && selectedIds.size" class="batch-bar">
           <span>已选 {{ selectedIds.size }} 项</span>
           <select v-model="batch.status" aria-label="批量审核状态"><option value="approved">通过</option><option value="rejected">拒绝</option><option value="unreviewed">待审核</option></select>
           <input v-model="batch.tags" aria-label="批量标签" placeholder="追加标签" />
@@ -70,7 +83,7 @@
         <div v-if="detailLoading" class="episode-loading">正在读取 Episodes…</div>
         <div v-else class="episode-scroll">
           <div v-for="item in filteredEpisodes" :key="item.episode" class="episode-row" :class="{ active: selectedEpisode?.episode === item.episode }">
-            <input type="checkbox" :checked="selectedIds.has(item.episode)" :aria-label="`选择 Episode ${item.episode}`" @change="toggleSelected(item.episode)" />
+            <input v-if="dataSection === 'review'" type="checkbox" :checked="selectedIds.has(item.episode)" :aria-label="`选择 Episode ${item.episode}`" @change="toggleSelected(item.episode)" />
             <button @click="selectEpisode(item)">
               <span class="episode-index">#{{ String(item.episode).padStart(3, "0") }}</span>
               <span class="episode-duration">{{ formatDuration(item.duration) }}</span>
@@ -89,12 +102,7 @@
           <i class="wide"></i><i></i><i></i><i class="video"></i><i class="video"></i>
         </div>
         <template v-else>
-        <div class="detail-tabs" role="tablist">
-          <button :class="{ active: detailView === 'episode' }" @click="detailView = 'episode'">审核</button>
-          <button :class="{ active: detailView === 'collections' }" @click="detailView = 'collections'">训练数据 <span>{{ collections.length }}</span></button>
-          <button :class="{ active: detailView === 'audit' }" @click="detailView = 'audit'">记录</button>
-        </div>
-        <template v-if="detailView === 'episode' && selectedEpisode">
+        <template v-if="dataSection === 'viewer' && selectedEpisode">
         <div class="review-head">
           <div><p class="eyebrow">片段 {{ String(selectedEpisode.episode).padStart(3, "0") }}</p><h3>{{ selectedEpisode.tasks.join(" / ") || "未命名任务" }}</h3></div>
           <div class="episode-facts"><span>{{ selectedEpisode.frames }} 帧</span><span>{{ selectedDataset?.fps }} FPS</span><span>{{ formatDuration(selectedEpisode.duration) }}</span></div>
@@ -116,6 +124,19 @@
           <div v-if="videoEntries.length === 0" class="video-missing">该 Episode 没有可回放的视频</div>
         </div>
 
+        </template>
+
+        <template v-else-if="dataSection === 'review' && selectedEpisode">
+          <div class="review-head">
+            <div><p class="eyebrow">片段 {{ String(selectedEpisode.episode).padStart(3, "0") }}</p><h3>{{ selectedEpisode.tasks.join(" / ") || "未命名任务" }}</h3></div>
+            <div class="episode-facts"><span>{{ selectedEpisode.frames }} 帧</span><span>{{ selectedDataset?.fps }} FPS</span><span>{{ formatDuration(selectedEpisode.duration) }}</span></div>
+          </div>
+          <div class="quality-panel" :class="{ warning: selectedEpisode.quality.flags.length }">
+            <div><small>自动检查</small><strong>{{ selectedEpisode.quality.score }} / 100</strong></div>
+            <span>{{ selectedEpisode.quality.cameraCoverage }} / {{ selectedEpisode.quality.expectedCameras }} 路视频</span>
+            <p v-if="!selectedEpisode.quality.flags.length">帧数与视频通道检查通过</p>
+            <ul v-else><li v-for="flag in selectedEpisode.quality.flags" :key="flag.code">{{ flag.label }}</li></ul>
+          </div>
         <div class="review-editor">
           <div class="editor-heading"><strong>审核与标注</strong><label><input v-model="syncEnabled" type="checkbox" /> 双路同步</label></div>
           <div class="status-control" role="group" aria-label="审核状态">
@@ -129,7 +150,7 @@
         </div>
         </template>
 
-        <section v-else-if="detailView === 'collections'" class="collections-pane">
+        <section v-else-if="dataSection === 'collections'" class="collections-pane">
           <header><div><h3>训练选集</h3></div><span>{{ approvedCount }} 个 Episode 已通过</span></header>
           <div class="publish-box">
             <label>版本名称<input v-model="collectionName" placeholder="例如：抓取任务基线集" /></label>
@@ -148,7 +169,7 @@
           <div v-else class="no-results">尚未发布训练选集</div>
         </section>
 
-        <section v-else class="audit-pane">
+        <section v-else-if="dataSection === 'audit'" class="audit-pane">
           <header><div><h3>操作记录</h3></div><span>最近 {{ auditEntries.length }} 条</span></header>
           <div v-if="auditEntries.length" class="audit-list">
             <article v-for="(entry, index) in auditEntries" :key="`${entry.at}-${index}`">
@@ -160,12 +181,16 @@
           </div>
           <div v-else class="no-results">尚无操作记录</div>
         </section>
+        <div v-else class="section-empty">从左侧选择功能区</div>
         </template>
       </section>
       <section v-else class="review-pane empty">选择一个数据集查看详情</section>
       </div>
       </template>
+      <section v-else class="section-empty no-dataset">请先从“数据资产”选择一个数据集</section>
     </template>
+      </section>
+    </div>
 
     <div v-if="deleteTarget" class="confirm-backdrop" @click.self="closeDeleteDialog">
       <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-title">
@@ -220,7 +245,8 @@ const videos = ref<HTMLVideoElement[]>([]);
 const videoErrors = reactive(new Set<string>());
 const collections = ref<TrainingCollection[]>([]);
 const auditEntries = ref<AuditEntry[]>([]);
-const detailView = ref<"episode" | "collections" | "audit">("episode");
+type DataSection = "datasets" | "viewer" | "review" | "collections" | "audit";
+const dataSection = ref<DataSection>("datasets");
 const collectionName = ref("");
 const deleteTarget = ref<DatasetSummary | null>(null);
 const deleteConfirmation = ref("");
@@ -295,6 +321,10 @@ function datasetReviewText(item: DatasetSummary) { const reviewed = item.reviews
 function toggleDatasetSelected(name: string) { selectedDatasetNames.has(name) ? selectedDatasetNames.delete(name) : selectedDatasetNames.add(name); }
 function toggleAllDatasets() { if (allDatasetsSelected.value) managerDatasets.value.forEach((item) => selectedDatasetNames.delete(item.name)); else managerDatasets.value.forEach((item) => selectedDatasetNames.add(item.name)); }
 function clearManagerFilters() { datasetQuery.value = ""; datasetType.value = "all"; reviewFilter.value = "all"; projectFilter.value = "all"; }
+function openSection(section: DataSection) {
+  if (section === "datasets") { closeDataset(); return; }
+  dataSection.value = section;
+}
 function deleteSelectedDataset() { const target = datasets.value.find((item) => selectedDatasetNames.has(item.name)); if (target) openDeleteDataset(target); }
 function tagsFrom(value: string) { return value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean); }
 function auditAction(action: string) { return ({ "review.update": "更新审核", "review.batch": "批量审核", "collection.publish": "发布训练选集", "collection.delete": "删除训练选集" } as Record<string, string>)[action] || action; }
@@ -331,7 +361,7 @@ async function loadDatasets(refresh = false) {
 
 async function selectDataset(item: DatasetSummary) {
   const requestId = ++detailRequest;
-  selectedDataset.value = item; selectedEpisode.value = null; selectedIds.clear(); error.value = null; detailLoading.value = true;
+  selectedDataset.value = item; selectedEpisode.value = null; selectedIds.clear(); dataSection.value = "viewer"; error.value = null; detailLoading.value = true;
   writeDatasetHash(item.name);
   if (demoMode.value) {
     episodes.value = demoEpisodes.map((episode) => ({ ...episode, review: { ...episode.review, tags: [...episode.review.tags] }, quality: { ...episode.quality, flags: [...episode.quality.flags] } }));
@@ -352,6 +382,7 @@ function closeDataset() {
   detailRequest += 1;
   selectedDataset.value = null; selectedEpisode.value = null; episodes.value = [];
   collections.value = []; auditEntries.value = []; selectedIds.clear(); detailLoading.value = false;
+  dataSection.value = "datasets";
   history.replaceState(null, "", `${location.pathname}${location.search}#datasets`);
 }
 
@@ -488,7 +519,10 @@ async function openDatasetFromHash() {
   if (dataset && selectedDataset.value?.name !== dataset.name) await selectDataset(dataset);
 }
 
-function onHashChange() { void openDatasetFromHash(); }
+function onHashChange() {
+  if (location.hash === "#datasets" && selectedDataset.value) { closeDataset(); return; }
+  void openDatasetFromHash();
+}
 
 onMounted(async () => {
   await loadDatasets();
@@ -564,4 +598,13 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
 
 /* Dataset detail: a compact local-review tool, not a dashboard. */
 .dataset-context { grid-template-columns:auto minmax(0,1fr) auto; margin-bottom:12px; padding:13px 15px; border:1px solid #dedfe0; border-radius:7px; }.dataset-context > button { padding:7px 0; border:0; color:#3d72ca; background:transparent; font-size:12px; }.dataset-context strong { color:#303235; font-size:14px; }.dataset-context small { margin-top:4px; font-size:11px; }.context-actions .danger-button { padding:6px 9px!important; border:1px solid #f0c9cb!important; border-radius:5px!important; background:#fff!important; color:#c13d43!important; }.data-layout { min-height:620px; border:1px solid #dedfe0; border-radius:7px; overflow:hidden; }.episode-list { border-right:1px solid #e3e4e5; }.pane-title { min-height:52px; padding:12px 14px; border-bottom:1px solid #e5e6e7; background:#fafbfb; }.pane-title strong { color:#36393c; font-size:13px; }.episode-tools { padding:10px; border-bottom:1px solid #e6e7e8; background:#fff; }.search { border-color:#d9dbdd; background:#fff; }.search input { color:#45494c; }.tool-row select { border-color:#d9dbdd; background:#fff; color:#62666a; }.select-all { color:#74787b; }.episode-row { border-color:#e7e8e9; }.episode-row > button { color:#3e4245; }.episode-index { color:#3e74cd; }.episode-duration,.episode-task { color:#686d70; }.review-state,.quality-state { border-radius:10px; background:#f0f1f1; color:#74787b; }.review-state.approved { background:#e8f6ee; color:#34815e; }.quality-state.issue { background:#fff1ef; color:#bb5546; }.detail-tabs { margin:0 -14px 16px; padding:0 14px; background:#fafbfb; }.detail-tabs button { padding:12px 10px; font-size:12px; }.review-head h3 { color:#34373a; font-size:15px; }.review-head .eyebrow { color:#818589; letter-spacing:0; }.episode-facts span { border:0; border-radius:0; background:transparent; color:#74787b; font-size:11px; }.quality-panel { border-left-width:3px; border-radius:0; }.quality-panel small,.quality-panel span,.quality-panel p,.quality-panel li { color:#617067; font-size:10px; }.quality-panel strong { color:#327b5a; }.videos { border:1px solid #e0e2e3; }.video-missing { min-height:210px; }.review-editor { padding-top:15px; }.editor-heading strong { color:#3b3f42; font-size:13px; }.editor-heading label { color:#777b7e; }.review-editor > label,.people-fields label { color:#64686b; font-size:11px; }.review-editor input,.review-editor textarea { padding:8px; font-size:12px; }.save-row { justify-content:space-between; }.save-row button { padding:8px 14px; border-radius:5px; }
+
+/* The data area is a workspace: browsing, reviewing and publishing are separate tasks. */
+.data-platform { display:grid; grid-template-columns:188px minmax(0,1fr); gap:20px; align-items:start; }
+.data-sidebar { position:sticky; top:84px; overflow:hidden; border:1px solid #dedfe0; border-radius:7px; background:#fff; }
+.data-sidebar-title { padding:17px 16px 15px; border-bottom:1px solid #e4e5e6; }.data-sidebar-title strong { color:#333639; font-size:14px; }
+.data-sidebar nav { display:grid; gap:2px; padding:8px; }.data-sidebar nav button { display:flex; align-items:center; gap:10px; min-height:37px; width:100%; padding:0 9px; border:0; border-radius:4px; background:transparent; color:#666a6d; cursor:pointer; font-size:12px; text-align:left; }.data-sidebar nav button:hover { background:#f5f7fa; color:#3e6fc8; }.data-sidebar nav button.active { background:#edf3ff; color:#396ec8; font-weight:700; }.data-sidebar nav button > span { width:16px; color:#8391a4; font:15px/1 ui-monospace,monospace; text-align:center; }.data-sidebar nav button.active > span { color:#3f76d1; }.data-sidebar nav i { margin-left:auto; min-width:18px; padding:2px 5px; border-radius:10px; background:#fff0d8; color:#9b6f1d; font-size:9px; font-style:normal; text-align:center; }
+.data-sidebar-foot { display:flex; align-items:center; justify-content:space-between; padding:11px 14px; border-top:1px solid #e8e9ea; color:#9a9da0; font-size:10px; }.data-sidebar-foot span.demo { color:#a57a24; }.data-sidebar-foot button { width:25px; height:25px; border:0; border-radius:4px; background:transparent; color:#6d89bc; cursor:pointer; font-size:17px; }.data-sidebar-foot button:hover { background:#edf3ff; }
+.data-content { min-width:0; }.section-empty { display:grid; place-items:center; min-height:360px; border:1px dashed #d6d8da; border-radius:7px; color:#8b8f92; font-size:12px; background:#fff; }.section-empty.no-dataset { margin:0; }
+@container (max-width:900px) { .data-platform { grid-template-columns:1fr; gap:12px; }.data-sidebar { position:static; }.data-sidebar nav { display:flex; overflow-x:auto; padding:7px; }.data-sidebar nav button { flex:0 0 auto; width:auto; padding:0 10px; }.data-sidebar-title { display:none; }.data-sidebar-foot { display:none; } }
 </style>

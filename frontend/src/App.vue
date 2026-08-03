@@ -404,7 +404,6 @@ body { background: #f7f8f8; color: #242629; }
 .live-panel { overflow: hidden; }
 .workspace-heading { display: flex; align-items: center; justify-content: space-between; padding: 15px 18px; border-bottom: 1px solid #e6e7e8; }
 .workspace-heading p { color: #303235; font-size: 14px; font-weight: 700; }
-.workspace-heading p::before { content: "▣"; margin-right: 8px; color: #50555a; }
 .workspace-heading h1 { margin-top: 3px; color: #929497; font-size: 11px; font-weight: 500; }
 .camera-count { padding: 5px 9px; border: 1px solid #d5e4df; border-radius: 12px; color: #348369; background: #f8fcfa; font-size: 11px; }
 .camera-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 14px; }
