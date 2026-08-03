@@ -4,6 +4,10 @@ import { EventEmitter } from "events";
 export interface BridgeMessage {
   type: string;
   joints?: Record<string, number>;
+  leader?: Record<string, number>;
+  follower?: Record<string, number>;
+  applied_seq?: number;
+  sensor_skew_ms?: number;
   data?: string;
   ts?: number;
   [key: string]: unknown;

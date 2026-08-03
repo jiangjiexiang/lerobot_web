@@ -99,6 +99,15 @@ def read_positions(bus: FeetechMotorsBus, *, normalize: bool = True) -> dict:
     return {name: int(val) if not normalize else float(val) for name, val in positions.items()}
 
 
+def complete_joint_state(joints: dict) -> bool:
+    """判断一组关节读数是否包含 SO-101 全部 6 个有效关节。"""
+    return (
+        isinstance(joints, dict)
+        and all(name in joints for name in MOTOR_NAMES)
+        and all(np.isfinite(value) for value in joints.values())
+    )
+
+
 def write_positions(bus: FeetechMotorsBus, goal_pos: dict, *, normalize: bool = True):
     """写入目标位置"""
     if not normalize:
@@ -174,6 +183,7 @@ def main():
 
     period = 1.0 / args.fps
     frame_count = 0
+    last_missing_observation_log = 0.0
     logger.info(f"控制频率: {args.fps} FPS")
     observation_period = 1.0 / max(1, min(args.fps, args.observation_fps))
     next_observation_at = 0.0
@@ -195,15 +205,25 @@ def main():
             if time.perf_counter() >= next_observation_at:
                 next_observation_at = loop_start + observation_period
                 follower_joints = read_positions(follower_bus, normalize=not use_raw)
-                observation = {
-                    "type": "teleop_observation",
-                    "leader": leader_joints,
-                    "follower": follower_joints,
-                    "ts": time.time(),
-                }
-                if applied_sequence is not None:
-                    observation["applied_seq"] = applied_sequence
-                print(json.dumps(observation), flush=True)
+                if complete_joint_state(leader_joints) and complete_joint_state(follower_joints):
+                    observation = {
+                        "type": "teleop_observation",
+                        "leader": leader_joints,
+                        "follower": follower_joints,
+                        "ts": time.time(),
+                    }
+                    if applied_sequence is not None:
+                        observation["applied_seq"] = applied_sequence
+                    print(json.dumps(observation), flush=True)
+                else:
+                    now = time.monotonic()
+                    if now - last_missing_observation_log >= 5.0:
+                        logger.warning(
+                            "跳过不完整关节采样: leader=%d follower=%d",
+                            len(leader_joints),
+                            len(follower_joints),
+                        )
+                        last_missing_observation_log = now
             sleep_time = period - (time.perf_counter() - loop_start)
             if sleep_time > 0:
                 time.sleep(sleep_time)

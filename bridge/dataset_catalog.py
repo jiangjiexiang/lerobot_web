@@ -43,6 +43,17 @@ def review_summary(dataset_root: Path) -> dict:
     return summary
 
 
+def directory_size(directory: Path) -> int:
+    total = 0
+    for item in directory.rglob("*"):
+        try:
+            if item.is_file():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
 def dataset_summary(dataset_root: Path) -> dict:
     info = read_json(dataset_root / "meta" / "info.json", {})
     modified = datetime.fromtimestamp(dataset_root.stat().st_mtime, tz=timezone.utc).isoformat()
@@ -55,6 +66,7 @@ def dataset_summary(dataset_root: Path) -> dict:
         "fps": info.get("fps", 0),
         "totalEpisodes": total_episodes,
         "totalFrames": int(info.get("total_frames", 0)),
+        "storageBytes": directory_size(dataset_root),
         "cameras": camera_keys(info),
         "modifiedAt": modified,
         "reviews": reviews,

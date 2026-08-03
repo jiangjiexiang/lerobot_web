@@ -1,25 +1,14 @@
 #!/usr/bin/env python3
 """Record synchronized web teleoperation samples as a LeRobot dataset."""
 
+from __future__ import annotations
+
 import argparse
 import base64
 import json
 import signal
 import sys
 from pathlib import Path
-
-import cv2
-import numpy as np
-
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
-from lerobot_dataset_compat import (
-    cancel_dataset,
-    capabilities,
-    create_dataset,
-    finalize_dataset,
-    resume_dataset,
-)
 
 DEFAULT_JOINT_NAMES = [
     "shoulder_pan",
@@ -30,6 +19,8 @@ DEFAULT_JOINT_NAMES = [
     "gripper",
 ]
 
+_DEPS_LOADED = False
+
 
 def emit(message: dict) -> None:
     print(json.dumps(message, ensure_ascii=False), flush=True)
@@ -37,6 +28,34 @@ def emit(message: dict) -> None:
 
 def terminate(_signum, _frame) -> None:
     raise SystemExit(143)
+
+
+def load_dependencies(args: argparse.Namespace) -> None:
+    global _DEPS_LOADED
+    global cv2, np, LeRobotDataset
+    global cancel_dataset, capabilities, create_dataset, finalize_dataset, resume_dataset
+
+    if _DEPS_LOADED:
+        return
+
+    import cv2
+    import numpy as np
+
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from lerobot_dataset_compat import (
+        cancel_dataset,
+        capabilities,
+        create_dataset,
+        finalize_dataset,
+        resume_dataset,
+    )
+
+    dataset_capabilities = capabilities()
+    args.streaming_encoding = args.streaming_encoding == "on" or (
+        args.streaming_encoding == "auto" and dataset_capabilities.streaming_encoding
+    )
+    args.vcodec = args.vcodec or None
+    _DEPS_LOADED = True
 
 
 def decode_image(encoded: str) -> np.ndarray:
@@ -72,6 +91,39 @@ def dataset_features(camera: np.ndarray, camera2: np.ndarray, joint_names: list[
             "names": ["height", "width", "channel"],
         },
     }
+
+
+def match_camera_to_existing_dataset(
+    root: str | Path, camera: np.ndarray, camera2: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """续录旧数据集时把新摄像头帧缩放到原数据集的视频尺寸。"""
+    root_path = Path(root).expanduser().resolve()
+    info_file = root_path / "meta" / "info.json"
+    if not info_file.is_file():
+        return camera, camera2
+
+    try:
+        info = json.loads(info_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return camera, camera2
+
+    features = info.get("features", {}) if isinstance(info, dict) else {}
+    shape1 = features.get("observation.images.camera1", {}).get("shape") if isinstance(
+        features.get("observation.images.camera1"), dict
+    ) else None
+    shape2 = features.get("observation.images.camera2", {}).get("shape") if isinstance(
+        features.get("observation.images.camera2"), dict
+    ) else None
+
+    if isinstance(shape1, (list, tuple)) and len(shape1) >= 2:
+        width, height = int(shape1[1]), int(shape1[0])
+        if width > 0 and height > 0 and camera.shape[:2] != (height, width):
+            camera = cv2.resize(camera, (width, height))
+    if isinstance(shape2, (list, tuple)) and len(shape2) >= 2:
+        width, height = int(shape2[1]), int(shape2[0])
+        if width > 0 and height > 0 and camera2.shape[:2] != (height, width):
+            camera2 = cv2.resize(camera2, (width, height))
+    return camera, camera2
 
 
 def open_dataset(
@@ -122,21 +174,12 @@ def main() -> None:
     parser.add_argument("--streaming-encoding", choices=("auto", "on", "off"), default="auto")
     parser.add_argument("--vcodec", default="")
     args = parser.parse_args()
-    dataset_capabilities = capabilities()
-    args.streaming_encoding = args.streaming_encoding == "on" or (
-        args.streaming_encoding == "auto" and dataset_capabilities.streaming_encoding
-    )
-    args.vcodec = args.vcodec or None
 
     dataset = None
     frame_count = 0
     completed = False
     joint_names = None
-    emit({
-        "type": "recorder_ready",
-        "lerobot_version": dataset_capabilities.version,
-        "streaming_encoding": args.streaming_encoding,
-    })
+    emit({"type": "recorder_ready"})
 
     try:
         for line in sys.stdin:
@@ -144,8 +187,10 @@ def main() -> None:
             message_type = message.get("type")
 
             if message_type == "record_frame":
+                load_dependencies(args)
                 camera = decode_image(message["camera"])
                 camera2 = decode_image(message["camera2"])
+                camera, camera2 = match_camera_to_existing_dataset(args.root, camera, camera2)
                 leader = message["leader"]
                 follower = message["follower"]
                 if joint_names is None:

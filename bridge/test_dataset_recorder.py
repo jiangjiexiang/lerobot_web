@@ -15,6 +15,36 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 
 class DatasetRecorderTest(unittest.TestCase):
+    def test_cancel_before_first_frame_does_not_wait_for_heavy_imports(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="lerobot-recorder-cancel-test-") as directory:
+            command = [
+                sys.executable,
+                str(Path(__file__).with_name("dataset_recorder.py")),
+                "--root",
+                str(Path(directory) / "demo"),
+                "--repo-id",
+                "local/demo",
+                "--fps",
+                "10",
+                "--task",
+                "cancel",
+                "--robot-type",
+                "so101_test",
+            ]
+            result = subprocess.run(
+                command,
+                input=json.dumps({"type": "cancel"}) + chr(10),
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        events = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(events[0]["type"], "recorder_ready")
+        self.assertEqual(events[-1]["type"], "recording_cancelled")
+
     def test_records_joint_schema_and_two_videos(self) -> None:
         image = np.zeros((48, 64, 3), dtype=np.uint8)
         image[:, :, 1] = 180
@@ -22,7 +52,7 @@ class DatasetRecorderTest(unittest.TestCase):
         self.assertTrue(ok)
         encoded = base64.b64encode(jpeg).decode("ascii")
         joints = {"axis_a": 0.1, "axis_b": -0.2, "tool": 0.3}
-        stdin = "\n".join(
+        first_stdin = "\n".join(
             [
                 json.dumps(
                     {
@@ -31,6 +61,26 @@ class DatasetRecorderTest(unittest.TestCase):
                         "follower": joints,
                         "camera": encoded,
                         "camera2": encoded,
+                    }
+                ),
+                json.dumps({"type": "save_episode"}),
+                "",
+            ]
+        )
+        large_image = np.zeros((720, 1280, 3), dtype=np.uint8)
+        large_image[:, :, 0] = 90
+        ok, large_jpeg = cv2.imencode(".jpg", large_image)
+        self.assertTrue(ok)
+        large_encoded = base64.b64encode(large_jpeg).decode("ascii")
+        second_stdin = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "record_frame",
+                        "leader": joints,
+                        "follower": joints,
+                        "camera": large_encoded,
+                        "camera2": large_encoded,
                     }
                 ),
                 json.dumps({"type": "save_episode"}),
@@ -54,10 +104,10 @@ class DatasetRecorderTest(unittest.TestCase):
                 "--robot-type",
                 "so101_test",
             ]
-            for expected_episode in (0, 1):
+            for expected_episode, episode_stdin in ((0, first_stdin), (1, second_stdin)):
                 result = subprocess.run(
                     recorder_command,
-                    input=stdin,
+                    input=episode_stdin,
                     text=True,
                     capture_output=True,
                     timeout=90,

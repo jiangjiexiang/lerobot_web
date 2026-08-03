@@ -25,8 +25,8 @@ const FRONTEND_DIST = path.join(__dirname, "../../frontend/dist");
 const DATASET_ROOT = path.resolve(process.env.DATASET_ROOT || path.join(process.env.HOME || "/tmp", "lerobot_datasets"));
 const ENABLE_CAMERA = process.env.ENABLE_CAMERA !== "0" && process.env.ENABLE_CAMERA !== "false";
 const CAMERA_FPS = parseInt(process.env.CAMERA_FPS || "30", 10);
-const CAMERA_WIDTH = parseInt(process.env.CAMERA_WIDTH || "640", 10);
-const CAMERA_HEIGHT = parseInt(process.env.CAMERA_HEIGHT || "360", 10);
+const CAMERA_WIDTH = parseInt(process.env.CAMERA_WIDTH || "1280", 10);
+const CAMERA_HEIGHT = parseInt(process.env.CAMERA_HEIGHT || "720", 10);
 const RECORDING_MAX_SENSOR_AGE_MS = parseInt(process.env.RECORDING_MAX_SENSOR_AGE_MS || "250", 10);
 const RECORDING_MAX_CAMERA_SKEW_MS = parseInt(process.env.RECORDING_MAX_CAMERA_SKEW_MS || "100", 10);
 const DATASET_STREAMING_ENCODING = process.env.DATASET_STREAMING_ENCODING || "auto";
@@ -45,6 +45,14 @@ const RTC_ICE_SERVERS = [
     credential: process.env.RTC_TURN_CREDENTIAL,
   }] : []),
 ];
+const RECORDER_JOINT_NAMES = [
+  "shoulder_pan",
+  "shoulder_lift",
+  "elbow_flex",
+  "wrist_flex",
+  "wrist_roll",
+  "gripper",
+] as const;
 const TRAINING_ROOT = path.join(DATASET_ROOT, ".lerobot-web", "training");
 const RUNTIME_LOG_ROOT = path.join(DATASET_ROOT, ".lerobot-web", "logs");
 const CONTROL_LATENCY_LOG_ROOT = path.join(RUNTIME_LOG_ROOT, "latency");
@@ -1333,8 +1341,7 @@ function recordCaptureSample(message: BridgeMessage): void {
   const now = Date.now();
   if (now < nextRecorderFrameAt || !latestCameraFrame || !latestCamera2Frame) return;
   if (
-    !message.leader
-    || !message.follower
+    !hasCompleteCaptureJoints(message)
     || Number(message.sensor_skew_ms || 0) > RECORDING_MAX_CAMERA_SKEW_MS
     || now - cameraLastFrameAt > RECORDING_MAX_SENSOR_AGE_MS
     || now - camera2LastFrameAt > RECORDING_MAX_SENSOR_AGE_MS
@@ -1350,6 +1357,19 @@ function recordCaptureSample(message: BridgeMessage): void {
     camera: latestCameraFrame.toString("base64"),
     camera2: latestCamera2Frame.toString("base64"),
   });
+}
+
+function isCompleteJointPayload(value: unknown): value is Record<string, number> {
+  if (typeof value !== "object" || value === null) return false;
+  const payload = value as Record<string, unknown>;
+  if (Object.keys(payload).length !== RECORDER_JOINT_NAMES.length) return false;
+  return RECORDER_JOINT_NAMES.every(
+    (name) => typeof payload[name] === "number" && Number.isFinite(payload[name]),
+  );
+}
+
+function hasCompleteCaptureJoints(message: BridgeMessage): boolean {
+  return isCompleteJointPayload(message.leader) && isCompleteJointPayload(message.follower);
 }
 
 app.get("/api/recording/status", (req, res) => {
@@ -2223,7 +2243,11 @@ app.post("/api/recording/start", (req, res) => {
     return;
   }
   const now = Date.now();
-  if (!latestObservation || now - latestObservationAt > RECORDING_MAX_SENSOR_AGE_MS) {
+  if (
+    !latestObservation
+    || !hasCompleteCaptureJoints(latestObservation)
+    || now - latestObservationAt > RECORDING_MAX_SENSOR_AGE_MS
+  ) {
     res.status(409).json({ ok: false, error: "没有收到实时关节状态和动作，无法开始录制" });
     return;
   }
@@ -2548,6 +2572,7 @@ app.post("/api/start", (req, res) => {
       case "teleop_observation":
         latestObservation = msg;
         latestObservationAt = Date.now();
+        recordCaptureSample(msg);
         broadcastControl(msg);
         break;
 

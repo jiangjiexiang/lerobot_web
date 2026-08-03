@@ -37,9 +37,9 @@ const formatLatency = (value: number | null) => value === null ? "-- ms" : `${va
 }
 .connection { display: flex; align-items: center; gap: 8px; }
 .metrics { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-.metrics span { padding: 4px 7px; border-radius: 6px; background: #101e30; color: #8fa9bd; font: 10px/1.2 ui-monospace, monospace; }
-.metrics .ok { color: #69d7a3; }
-.metrics .bad { color: #ff9aaa; }
+.metrics span { padding: 4px 7px; border-radius: 4px; background: #202124; color: #c3c6c8; font: 10px/1.2 ui-monospace, monospace; }
+.metrics .ok { color: #8fd0ad; }
+.metrics .bad { color: #f09a9f; }
 .dot {
   width: 10px;
   height: 10px;
@@ -47,13 +47,10 @@ const formatLatency = (value: number | null) => value === null ? "-- ms" : `${va
   background: #555;
   transition: all 0.3s;
 }
-.dot.on {
-  background: #4caf50;
-  box-shadow: 0 0 8px #4caf50;
-}
+.dot.on { background: #55ab7d; box-shadow: 0 0 0 3px rgba(85, 171, 125, .14); }
 .dot.on.run {
-  background: #e94560;
-  box-shadow: 0 0 8px #e94560;
+  background: #e45b61;
+  box-shadow: 0 0 0 3px rgba(228, 91, 97, .14);
 }
 .status-text {
   font-size: 13px;

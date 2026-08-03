@@ -33,20 +33,20 @@
         <div v-if="selectedDatasetNames.size" class="manager-selection"><span>已选 {{ selectedDatasetNames.size }} 项</span><button @click="selectedDatasetNames.clear()">取消选择</button></div>
         <div class="data-table-wrap">
           <table class="data-table">
-            <thead><tr><th><input type="checkbox" :checked="allDatasetsSelected" aria-label="选择全部数据集" @change="toggleAllDatasets" /></th><th>数据名称</th><th>机器人</th><th>Episodes</th><th>帧数</th><th>相机</th><th>上传时间</th><th>审核状态</th><th>操作</th></tr></thead>
+            <thead><tr><th><input type="checkbox" :checked="allDatasetsSelected" aria-label="选择全部数据集" @change="toggleAllDatasets" /></th><th>数据名称</th><th>机器人</th><th>Episodes</th><th>帧数</th><th>占用</th><th>相机</th><th>上传时间</th><th>审核状态</th><th>操作</th></tr></thead>
             <tbody>
               <tr v-for="item in managerDatasets" :key="item.name">
                 <td><input type="checkbox" :checked="selectedDatasetNames.has(item.name)" :aria-label="`选择 ${item.name}`" @change="toggleDatasetSelected(item.name)" /></td>
                 <td><button class="dataset-link" @click="selectDataset(item)">{{ item.name }}</button><small>{{ item.fps }} FPS · {{ item.totalEpisodes }} 段采集</small></td>
-                <td><span class="project-tag">{{ item.robotType || "LeRobot" }}</span></td><td>{{ item.totalEpisodes }}</td><td>{{ item.totalFrames.toLocaleString() }}</td><td>{{ item.cameras.length }} 路</td><td>{{ formatDate(item.modifiedAt) }}</td>
+                <td><span class="project-tag">{{ item.robotType || "LeRobot" }}</span></td><td>{{ item.totalEpisodes }}</td><td>{{ item.totalFrames.toLocaleString() }}</td><td>{{ formatBytes(item.storageBytes) }}</td><td>{{ item.cameras.length }} 路</td><td>{{ formatDate(item.modifiedAt) }}</td>
                 <td><span :class="['review-pill', datasetReviewState(item)]">{{ datasetReviewText(item) }}</span></td>
                 <td><button class="row-action" @click="selectDataset(item)">查看 <span>›</span></button><button class="row-menu" :aria-label="`管理 ${item.name}`" @click="openDeleteDataset(item)">•••</button></td>
               </tr>
-              <tr v-if="managerDatasets.length === 0"><td colspan="9" class="no-results">没有符合筛选条件的数据</td></tr>
+              <tr v-if="managerDatasets.length === 0"><td colspan="10" class="no-results">没有符合筛选条件的数据</td></tr>
             </tbody>
           </table>
         </div>
-        <footer class="manager-footer"><span>共 {{ managerDatasets.length }} 条数据</span><span>本地存储 {{ root || "-" }}</span><div><button disabled>‹</button><strong>1</strong><button disabled>›</button></div></footer>
+        <footer class="manager-footer"><span>共 {{ managerDatasets.length }} 条数据</span><span>已占用 {{ formatBytes(totalStorageBytes) }}</span><span>本地存储 {{ root || "-" }}</span><div><button disabled>‹</button><strong>1</strong><button disabled>›</button></div></footer>
         <div class="manager-actions"><button title="刷新目录" @click="loadDatasets(true)">↻<span>刷新</span></button><button :disabled="!selectedDatasetNames.size" @click="selectedDatasetNames.clear()">×<span>取消选择</span></button><button :disabled="!selectedDatasetNames.size" @click="deleteSelectedDataset">⌫<span>删除</span></button></div>
       </section>
 
@@ -84,7 +84,7 @@
         <div v-else class="episode-scroll">
           <div v-for="item in filteredEpisodes" :key="item.episode" class="episode-row" :class="{ active: selectedEpisode?.episode === item.episode }">
             <input v-if="dataSection === 'review'" type="checkbox" :checked="selectedIds.has(item.episode)" :aria-label="`选择 Episode ${item.episode}`" @change="toggleSelected(item.episode)" />
-            <button @click="selectEpisode(item)">
+            <button :class="{ 'with-checkbox': dataSection === 'review' }" @click="selectEpisode(item)">
               <span class="episode-index">#{{ String(item.episode).padStart(3, "0") }}</span>
               <span class="episode-duration">{{ formatDuration(item.duration) }}</span>
               <span class="episode-task">{{ item.tasks.join(" / ") || "未命名任务" }}</span>
@@ -214,7 +214,7 @@ type ReviewStatus = "unreviewed" | "approved" | "rejected";
 interface Review { status: ReviewStatus; tags: string[]; notes: string; assignee?: string; reviewer?: string; qualityFlags?: string[]; createdAt?: string; updatedAt?: string }
 interface QualityFlag { code: string; level: "warning" | "error"; label: string }
 interface Quality { score: number; flags: QualityFlag[]; cameraCoverage: number; expectedCameras: number }
-interface DatasetSummary { name: string; robotType: string | null; fps: number; totalEpisodes: number; totalFrames: number; cameras: string[]; modifiedAt: string; reviews: Record<ReviewStatus, number> }
+interface DatasetSummary { name: string; robotType: string | null; fps: number; totalEpisodes: number; totalFrames: number; storageBytes?: number; cameras: string[]; modifiedAt: string; reviews: Record<ReviewStatus, number> }
 interface Episode { episode: number; frames: number; duration: number; tasks: string[]; videos: Record<string, string>; quality: Quality; review: Review }
 interface TrainingCollection { id: string; name: string; createdAt: string; episodes: Array<{ episode: number; tags: string[]; reviewUpdatedAt: string }> }
 interface AuditEntry { at: string; action: string; actor?: string; episodes?: number[]; status?: ReviewStatus; collection?: string; tags?: string[] }
@@ -263,10 +263,10 @@ const reviewStates: { value: ReviewStatus; label: string }[] = [
   { value: "rejected", label: "拒绝" },
 ];
 const demoDatasets: DatasetSummary[] = [
-  { name: "pick_place_blocks_2026_08_03", robotType: "SO-101 双臂", fps: 30, totalEpisodes: 48, totalFrames: 17280, cameras: ["camera", "camera2"], modifiedAt: "2026-08-03T09:42:00+08:00", reviews: { unreviewed: 16, approved: 30, rejected: 2 } },
-  { name: "sort_objects_tabletop_2026_08_02", robotType: "SO-101 双臂", fps: 30, totalEpisodes: 36, totalFrames: 12960, cameras: ["camera", "camera2"], modifiedAt: "2026-08-02T16:20:00+08:00", reviews: { unreviewed: 12, approved: 23, rejected: 1 } },
-  { name: "drawer_open_close_2026_08_01", robotType: "SO-101", fps: 15, totalEpisodes: 24, totalFrames: 5400, cameras: ["camera", "camera2"], modifiedAt: "2026-08-01T11:08:00+08:00", reviews: { unreviewed: 24, approved: 0, rejected: 0 } },
-  { name: "cable_insert_baseline", robotType: "SO-101", fps: 30, totalEpisodes: 18, totalFrames: 6480, cameras: ["camera", "camera2"], modifiedAt: "2026-07-31T14:35:00+08:00", reviews: { unreviewed: 3, approved: 14, rejected: 1 } },
+  { name: "pick_place_blocks_2026_08_03", robotType: "SO-101 双臂", fps: 30, totalEpisodes: 48, totalFrames: 17280, storageBytes: 786432000, cameras: ["camera", "camera2"], modifiedAt: "2026-08-03T09:42:00+08:00", reviews: { unreviewed: 16, approved: 30, rejected: 2 } },
+  { name: "sort_objects_tabletop_2026_08_02", robotType: "SO-101 双臂", fps: 30, totalEpisodes: 36, totalFrames: 12960, storageBytes: 604241920, cameras: ["camera", "camera2"], modifiedAt: "2026-08-02T16:20:00+08:00", reviews: { unreviewed: 12, approved: 23, rejected: 1 } },
+  { name: "drawer_open_close_2026_08_01", robotType: "SO-101", fps: 15, totalEpisodes: 24, totalFrames: 5400, storageBytes: 251658240, cameras: ["camera", "camera2"], modifiedAt: "2026-08-01T11:08:00+08:00", reviews: { unreviewed: 24, approved: 0, rejected: 0 } },
+  { name: "cable_insert_baseline", robotType: "SO-101", fps: 30, totalEpisodes: 18, totalFrames: 6480, storageBytes: 335544320, cameras: ["camera", "camera2"], modifiedAt: "2026-07-31T14:35:00+08:00", reviews: { unreviewed: 3, approved: 14, rejected: 1 } },
 ];
 const demoEpisodes: Episode[] = Array.from({ length: 8 }, (_, episode) => ({
   episode,
@@ -279,6 +279,7 @@ const demoEpisodes: Episode[] = Array.from({ length: 8 }, (_, episode) => ({
 }));
 const totalEpisodes = computed(() => datasets.value.reduce((sum, item) => sum + item.totalEpisodes, 0));
 const totalFrames = computed(() => datasets.value.reduce((sum, item) => sum + item.totalFrames, 0));
+const totalStorageBytes = computed(() => datasets.value.reduce((sum, item) => sum + (item.storageBytes || 0), 0));
 const reviewedEpisodes = computed(() => datasets.value.reduce((sum, item) => sum + item.reviews.approved + item.reviews.rejected, 0));
 const reviewRate = computed(() => totalEpisodes.value ? Math.round(reviewedEpisodes.value / totalEpisodes.value * 100) : 0);
 const totalDuration = computed(() => `${Math.round(totalFrames.value / Math.max(1, selectedDataset.value?.fps || 30) / 60)} 分钟`);
@@ -314,6 +315,7 @@ const videoEntries = computed(() => Object.entries(selectedEpisode.value?.videos
 function statusText(status: ReviewStatus) { return ({ unreviewed: "待审核", approved: "通过", rejected: "拒绝" })[status]; }
 function formatDuration(seconds: number) { const total = Math.max(0, Math.round(seconds)); return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`; }
 function formatDate(value?: string) { if (!value) return "-"; return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
+function formatBytes(value?: number) { if (!value) return "-"; const units = ["B", "KB", "MB", "GB", "TB"]; const index = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024))); return `${(value / 1024 ** index).toFixed(index > 1 ? 1 : 0)} ${units[index]}`; }
 function cameraLabel(camera: string, index: number) { return camera.split(".").pop()?.replace("camera", "摄像头 ") || `摄像头 ${index + 1}`; }
 function reviewWidth(item: DatasetSummary, status: ReviewStatus) { return item.totalEpisodes ? `${(item.reviews[status] || 0) / item.totalEpisodes * 100}%` : "0%"; }
 function datasetReviewState(item: DatasetSummary) { const reviewed = item.reviews.approved + item.reviews.rejected; return reviewed >= item.totalEpisodes && item.totalEpisodes > 0 ? "reviewed" : reviewed ? "partial" : "pending"; }
@@ -548,7 +550,7 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
 .dataset-row { position: relative; display: grid; gap: 5px; width: 100%; padding: 12px; border: 0; border-bottom: 1px solid rgba(151,188,222,.08); text-align: left; cursor: pointer; background: transparent; color: #dce8f2; }.dataset-row:hover,.dataset-row.selected { background: #14283b; }.dataset-row.selected::before,.episode-row.active::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: #66c8e8; }.dataset-name { overflow: hidden; font-size: 11px; font-weight: 650; text-overflow: ellipsis; }.dataset-meta,.dataset-time { color: #738da1; font-size: 8px; }.review-meter { display: flex; height: 3px; overflow: hidden; background: #263545; }.review-meter i.approved { background: #54c994; }.review-meter i.rejected { background: #e86676; }
 .episode-tools { display: grid; gap: 6px; padding: 8px; border-bottom: 1px solid rgba(151,188,222,.1); }.search { display: flex; align-items: center; gap: 5px; padding: 0 7px; border: 1px solid #29435f; border-radius: 4px; background: #091522; color: #688195; }.search input { min-width: 0; width: 100%; padding: 7px 0; border: 0; outline: 0; background: transparent; color: #e7edf8; font-size: 10px; }.tool-row { display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 4px; } select,.batch-bar input { min-width: 0; padding: 6px; border: 1px solid #29435f; border-radius: 4px; outline: 0; background: #101f2e; color: #a8bdcc; font-size: 9px; }.select-all { display: flex; align-items: center; gap: 6px; color: #7890a3; font-size: 9px; }
 .batch-bar { display: grid; grid-template-columns: auto 75px minmax(70px,1fr) auto 25px; align-items: center; gap: 5px; padding: 7px 8px; border-bottom: 1px solid #315574; background: #142c40; color: #b8d3e5; font-size: 9px; }.batch-bar button { padding: 6px 9px; border: 0; border-radius: 4px; cursor: pointer; background: #64c9e8; color: #07131c; font-size: 9px; font-weight: 650; }.batch-bar .clear { padding: 3px; background: transparent; color: #91a9bb; font-size: 16px; }
-.episode-scroll { max-height: calc(100vh - 365px); overflow: auto; }.episode-loading,.no-results { display: grid; place-items: center; min-height: 140px; color: #71899c; font-size: 10px; }.episode-row { position: relative; display: grid; grid-template-columns: 28px 1fr; align-items: center; border-bottom: 1px solid rgba(151,188,222,.08); }.episode-row:hover,.episode-row.active { background: #14283b; }.episode-row > input { justify-self: center; }.episode-row > button { display: grid; grid-template-columns: 1fr auto; gap: 5px; min-width: 0; padding: 10px 10px 10px 0; border: 0; text-align: left; cursor: pointer; background: transparent; color: #dce8f2; }.episode-index { font: 10px ui-monospace, monospace; }.episode-duration { color: #8197aa; font: 9px ui-monospace, monospace; }.episode-task { grid-column: 1/-1; overflow: hidden; color: #9fb1c0; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.review-state,.quality-state { width: fit-content; padding: 2px 5px; border-radius: 3px; color: #8ba0b0; background: #253443; font-size: 8px; }.quality-state { grid-column: 2; grid-row: 3; }.review-state.approved { color: #65daa4; background: #173a31; }.review-state.rejected,.quality-state.issue { color: #ff91a0; background: #3a2028; }
+.episode-scroll { max-height: calc(100vh - 365px); overflow: auto; }.episode-loading,.no-results { display: grid; place-items: center; min-height: 140px; color: #71899c; font-size: 10px; }.episode-row { position: relative; display: grid; grid-template-columns: 28px minmax(0,1fr); align-items: center; border-bottom: 1px solid rgba(151,188,222,.08); }.episode-row:hover,.episode-row.active { background: #14283b; }.episode-row > input { grid-column: 1; justify-self: center; }.episode-row > button { grid-column: 1 / -1; display: grid; grid-template-columns: 34px 42px minmax(0,1fr) auto auto; align-items: center; gap: 8px; min-width: 0; padding: 10px 10px 10px 0; border: 0; text-align: left; cursor: pointer; background: transparent; color: #dce8f2; }.episode-row > button.with-checkbox { grid-column: 2 / -1; }.episode-index { font: 10px ui-monospace, monospace; }.episode-duration { color: #8197aa; font: 9px ui-monospace, monospace; }.episode-task { min-width: 0; overflow: hidden; color: #9fb1c0; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.review-state,.quality-state { width: fit-content; padding: 2px 5px; border-radius: 3px; color: #8ba0b0; background: #253443; font-size: 8px; white-space: nowrap; }.review-state.approved { color: #65daa4; background: #173a31; }.review-state.rejected,.quality-state.issue { color: #ff91a0; background: #3a2028; }
 .review-pane { min-width: 0; padding: 14px; overflow: hidden; }.review-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 10px; }.review-head h3 { max-width: 650px; margin-top: 3px; overflow-wrap: anywhere; font-size: 14px; }.episode-facts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }.episode-facts span { padding: 4px 6px; border-radius: 4px; background: #152638; color: #89a1b4; font: 9px ui-monospace, monospace; }
 .detail-skeleton { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }.detail-skeleton i { height: 34px; border-radius: 5px; background: linear-gradient(100deg,#102030 30%,#1a3347 48%,#102030 66%); background-size: 220% 100%; animation: catalog-shimmer 1.25s linear infinite; }.detail-skeleton .wide { grid-column: 1/-1; }.detail-skeleton .video { height: auto; aspect-ratio: 16/9; }
 .detail-tabs { display: flex; gap: 3px; margin: -4px 0 12px; border-bottom: 1px solid rgba(151,188,222,.13); }.detail-tabs button { position: relative; padding: 8px 10px; border: 0; cursor: pointer; background: transparent; color: #71899c; font-size: 9px; }.detail-tabs button.active { color: #dff5ff; }.detail-tabs button.active::after { content: ""; position: absolute; right: 8px; bottom: -1px; left: 8px; height: 2px; background: #64c9e8; }.detail-tabs span { margin-left: 3px; color: #5e849b; }
@@ -607,4 +609,7 @@ onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
 .data-sidebar-foot { display:flex; align-items:center; justify-content:space-between; padding:11px 14px; border-top:1px solid #e8e9ea; color:#9a9da0; font-size:10px; }.data-sidebar-foot span.demo { color:#a57a24; }.data-sidebar-foot button { width:25px; height:25px; border:0; border-radius:4px; background:transparent; color:#6d89bc; cursor:pointer; font-size:17px; }.data-sidebar-foot button:hover { background:#edf3ff; }
 .data-content { min-width:0; }.section-empty { display:grid; place-items:center; min-height:360px; border:1px dashed #d6d8da; border-radius:7px; color:#8b8f92; font-size:12px; background:#fff; }.section-empty.no-dataset { margin:0; }
 @container (max-width:900px) { .data-platform { grid-template-columns:1fr; gap:12px; }.data-sidebar { position:static; }.data-sidebar nav { display:flex; overflow-x:auto; padding:7px; }.data-sidebar nav button { flex:0 0 auto; width:auto; padding:0 10px; }.data-sidebar-title { display:none; }.data-sidebar-foot { display:none; } }
+
+/* Playback keeps the recorded frame as large as the review pane allows. */
+.videos { grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); align-items:start; gap:10px; padding:14px; border:0; background:#f7f8f8; }.videos.single { grid-template-columns:minmax(280px,900px); justify-content:center; }.video-channel { min-width:0; overflow:hidden; border:1px solid #e0e2e3; border-radius:6px; background:#fff; }.video-channel video { display:block; width:100%; max-height:520px; aspect-ratio:16/9; background:#101112; object-fit:contain; }.video-channel span,.video-channel small { display:block; padding:7px 9px; color:#5f6468; font-size:11px; }.video-channel small { color:#c23c43; }.video-missing { grid-column:1/-1; display:grid; place-items:center; min-height:220px; border:1px dashed #d5d8da; border-radius:6px; color:#8b8f92; background:#fff; font-size:11px; }
 </style>

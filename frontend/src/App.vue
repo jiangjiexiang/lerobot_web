@@ -414,6 +414,7 @@ body { background: #f7f8f8; color: #242629; }
 .self-check-overlay, .fatal-overlay { background: rgba(22, 25, 29, .52); }
 .self-check-modal { border-color: #dedede; border-radius: 8px; background: #fff; box-shadow: 0 18px 55px rgba(0, 0, 0, .2); color: #282a2d; }
 .self-check-results { background: #f7f8f8; }.self-check-note { color: #74777b; }.self-check-actions .secondary { color: #45494d; background: #e9eaeb; }.self-check-actions .primary { color: #fff; background: #e94b50; }
+.spinner { border-color:#d8dadd; border-top-color:#5b83ca; box-shadow:none; }.loading-dots i { background:#5b83ca; }.self-check-state { background:#eef0f1; color:#62676b; }.self-check-state.checking { color:#3f73cb; }.self-check-state.ok,.self-check-results .ok { color:#35805d; }.self-check-state.warn,.self-check-results .warn { color:#956b1e; }.self-check-results .bad { color:#c23c43; }
 .fatal-modal { border-radius: 8px; background: #fff; color: #282a2d; }.fatal-message { background: #fff3f4; color: #b63038; }.fatal-hint { color: #74777b; }.fatal-actions .primary { color: #fff; background: #e94b50; }
 @media (max-width: 1180px) { .main { padding: 24px; grid-template-columns: minmax(0, 1fr) 350px; }.topbar { padding: 0 22px; gap: 15px; } }
 @media (max-width: 880px) { .topbar { height: auto; min-height: 60px; flex-wrap: wrap; padding-block: 10px; }.topbar-status { display: none; }.main { grid-template-columns: 1fr; grid-template-areas: "live" "recorder"; }.right-rail { width: min(100%, 600px); } }
