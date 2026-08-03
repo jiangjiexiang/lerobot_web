@@ -45,10 +45,12 @@ const ROSBAG_REQUIRE_MCAP = process.env.ROSBAG_REQUIRE_MCAP === "1" || process.e
 const DATASET_STREAMING_ENCODING = process.env.DATASET_STREAMING_ENCODING || "auto";
 const DATASET_VIDEO_CODEC = process.env.DATASET_VIDEO_CODEC || "auto";
 const DEFAULT_STREAM_FPS = parseInt(process.env.STREAM_FPS || "0", 10);
+const CONTROL_OBSERVATION_FPS = parseInt(process.env.CONTROL_OBSERVATION_FPS || "30", 10);
 const ENABLE_WEBRTC = process.env.ENABLE_WEBRTC !== "0" && process.env.ENABLE_WEBRTC !== "false";
 const ENABLE_WEBRTC_VIDEO = process.env.ENABLE_WEBRTC_VIDEO === "1" || process.env.ENABLE_WEBRTC_VIDEO === "true";
 const RTC_VIDEO_FPS = parseInt(process.env.RTC_VIDEO_FPS || "15", 10);
 const RTC_VIDEO_BITRATE = parseInt(process.env.RTC_VIDEO_BITRATE || "1500000", 10);
+const RTC_CONTROL_TIMEOUT_MS = parseInt(process.env.RTC_CONTROL_TIMEOUT_MS || "2000", 10);
 const RTC_ICE_SERVERS = [
   ...(process.env.RTC_STUN_URL ? [{ urls: process.env.RTC_STUN_URL }] : []),
   ...(process.env.RTC_TURN_URL ? [{
@@ -59,6 +61,7 @@ const RTC_ICE_SERVERS = [
 ];
 const TRAINING_ROOT = path.join(DATASET_ROOT, ".lerobot-web", "training");
 const RUNTIME_LOG_ROOT = path.join(DATASET_ROOT, ".lerobot-web", "logs");
+const CONTROL_LATENCY_LOG_ROOT = path.join(RUNTIME_LOG_ROOT, "latency");
 const DATASET_TRASH_ROOT = path.join(DATASET_ROOT, ".lerobot-web", "trash");
 
 type RuntimeLogLevel = "info" | "warn" | "error";
@@ -79,15 +82,46 @@ function localLogSessionKey(date = new Date()): string {
 }
 
 const RUNTIME_LOG_SESSION_ID = localLogSessionKey();
+const pendingLogWrites = new Map<string, string[]>();
+const pendingLogFlushes = new Map<string, NodeJS.Timeout>();
+
+function queueJsonlLog(root: string, filename: string, entry: Record<string, unknown>): void {
+  const file = path.join(root, filename);
+  const lines = pendingLogWrites.get(file) || [];
+  lines.push(`${JSON.stringify(entry)}\n`);
+  pendingLogWrites.set(file, lines);
+  if (pendingLogFlushes.has(file)) return;
+
+  const timer = setTimeout(() => {
+    pendingLogFlushes.delete(file);
+    const buffered = pendingLogWrites.get(file);
+    pendingLogWrites.delete(file);
+    if (!buffered?.length) return;
+    fs.mkdir(root, { recursive: true }, (mkdirError) => {
+      if (mkdirError) {
+        console.error("[Logs] 创建日志目录失败:", mkdirError);
+        return;
+      }
+      fs.appendFile(file, buffered.join(""), "utf-8", (writeError) => {
+        if (writeError) console.error("[Logs] 写入本地日志失败:", writeError);
+      });
+    });
+  }, 250);
+  timer.unref();
+  pendingLogFlushes.set(file, timer);
+}
 
 function persistRuntimeLog(source: RuntimeLogSource, level: RuntimeLogLevel, message: string): void {
-  try {
-    fs.mkdirSync(RUNTIME_LOG_ROOT, { recursive: true });
-    const entry = JSON.stringify({ timestamp: new Date().toISOString(), source, level, message });
-    fs.appendFileSync(path.join(RUNTIME_LOG_ROOT, `${RUNTIME_LOG_SESSION_ID}.jsonl`), `${entry}\n`, "utf-8");
-  } catch (error) {
-    console.error("[Logs] 写入本地日志失败:", error);
-  }
+  queueJsonlLog(RUNTIME_LOG_ROOT, `${RUNTIME_LOG_SESSION_ID}.jsonl`, {
+    timestamp: new Date().toISOString(), source, level, message,
+  });
+}
+
+function persistControlLatency(metrics: Record<string, number | null>): void {
+  queueJsonlLog(CONTROL_LATENCY_LOG_ROOT, `${RUNTIME_LOG_SESSION_ID}.jsonl`, {
+    timestamp: new Date().toISOString(),
+    ...metrics,
+  });
 }
 
 persistRuntimeLog("system", "info", `Robot Server 启动，会话 ${RUNTIME_LOG_SESSION_ID}`);
@@ -187,15 +221,25 @@ const rtcGateway = new RtcGateway({
   iceServers: RTC_ICE_SERVERS,
   maxVideoFps: RTC_VIDEO_FPS,
   maxVideoBitrate: RTC_VIDEO_BITRATE,
+  controlTimeoutMs: RTC_CONTROL_TIMEOUT_MS,
   onControl: (message) => {
     if (bridge?.isRunning() && remoteLeaderActive && !stopping) {
       bridge.send(message as BridgeMessage);
     }
   },
   onSafetyStop: () => { stopTeleop(); },
-  onControlLost: () => {
+  onControlLost: (reason, idleMs) => {
+    const detail = `${reason}, ${Math.round(idleMs)}ms 未收到控制消息`;
+    // The browser keeps a separate control WebSocket open as a transport
+    // fallback. A transient RTC failure must not tear down an otherwise healthy
+    // teleop session; the Python command timeout already holds position until
+    // fresh fallback actions arrive.
+    if (remoteLeaderActive && clients.size > 0) {
+      console.warn(`[WebRTC] 控制链路异常 (${detail})，已切换到 WebSocket 控制`);
+      return;
+    }
     if (remoteLeaderActive && stopTeleop()) {
-      console.warn("[WebRTC] 控制 DataChannel 超时或断开，已停止遥操作");
+      console.warn(`[WebRTC] 控制链路异常 (${detail}) 且 WebSocket 不可用，已停止遥操作`);
     }
   },
 });
@@ -1438,6 +1482,24 @@ app.get("/api/recording/status", (req, res) => {
   res.json({ ok: true, ...recordingStatus, root: DATASET_ROOT });
 });
 
+app.post("/api/logs/latency", (req, res) => {
+  const fields = ["controlLatencyMs", "cameraLatencyMs", "camera2LatencyMs", "controlFps", "cameraFps", "camera2Fps"] as const;
+  const metrics: Record<string, number | null> = {};
+  for (const field of fields) {
+    const value = req.body?.[field];
+    if (value === null || value === undefined) {
+      metrics[field] = null;
+    } else if (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 600000) {
+      metrics[field] = Math.round(value * 10) / 10;
+    } else {
+      res.status(400).json({ ok: false, error: `${field} 必须是有效的非负数或 null` });
+      return;
+    }
+  }
+  persistControlLatency(metrics);
+  res.status(202).json({ ok: true });
+});
+
 app.get("/api/logs", (_req, res) => {
   try {
     fs.mkdirSync(RUNTIME_LOG_ROOT, { recursive: true });
@@ -2629,6 +2691,7 @@ app.post("/api/start", (req, res) => {
     "--leader-port", leader_port,
     "--leader-id", leader_id,
     "--fps", String(fps),
+    "--observation-fps", String(Math.max(1, Math.min(fps, CONTROL_OBSERVATION_FPS))),
     "--stream-fps", String(stream_fps),
   ];
   if (CONTROL_BACKEND === "ros2") {

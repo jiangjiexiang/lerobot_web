@@ -76,8 +76,12 @@ export function useLeaderSerial(
   async function syncReadPositions(ids: number[]): Promise<Map<number, number>> {
     if (!writer) throw new Error("串口尚未连接");
     let lastError = "读取超时";
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      // 上一轮超时后可能还会有迟到的响应；不要把它们误当成本轮数据。
+      buffer = [];
       await writer.write(packet(0xfe, 0x82, [56, 2, ...ids]));
+      // 半双工 USB 转换器需要一点时间从发送切回接收。
+      await delay(3);
       const results = new Map<number, number>();
       try {
         const deadline = performance.now() + 150;
@@ -95,10 +99,9 @@ export function useLeaderSerial(
         lastError = cause instanceof Error ? cause.message : String(cause);
       }
       if (readFailure || !active) break;
-      buffer = [];
-      await delay(20);
+      await delay(10 + attempt * 10);
     }
-    throw new Error(`SYNC_READ ${lastError}（已重试 3 次）`);
+    throw new Error(`SYNC_READ ${lastError}（已重试 5 次）`);
   }
 
   async function disableLeaderTorque() {
@@ -156,6 +159,7 @@ export function useLeaderSerial(
     const interval = Math.max(16, Math.round(1000 / Math.min(60, Math.max(1, fps))));
     const poll = async () => {
       if (!active) return;
+      const pollStartedAt = performance.now();
       try {
         const raw = await syncReadPositions(motorIds);
         const values = {} as JointData;
@@ -177,8 +181,9 @@ export function useLeaderSerial(
           if (consecutivePollFailures === 1) log(`Leader 串口瞬时丢包: ${error.value}`);
           // 丢弃不完整的一轮动作；机器人端超时后保持当前位置，下一轮重新读取全部关节。
           buffer = [];
-          if (consecutivePollFailures < 5) {
-            window.setTimeout(poll, 50);
+          if (consecutivePollFailures < 8) {
+            const recoveryDelay = Math.min(250, 50 * 2 ** Math.min(consecutivePollFailures - 1, 2));
+            window.setTimeout(poll, recoveryDelay);
             return;
           }
         } else {
@@ -189,7 +194,10 @@ export function useLeaderSerial(
         await onFatalDisconnect();
         return;
       }
-      window.setTimeout(poll, interval);
+      // Keep the requested start-to-start cadence. Waiting a full interval after
+      // the serial round trip made a nominal 60 FPS loop run much slower.
+      const remaining = Math.max(0, interval - (performance.now() - pollStartedAt));
+      window.setTimeout(poll, remaining);
     };
     void poll();
   }

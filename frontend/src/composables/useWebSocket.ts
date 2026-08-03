@@ -74,9 +74,11 @@ export function useWebSocket() {
   let rtcStateOpen = false;
   let rtcVideoOpen = false;
   let rtcSequence = 0;
+  const controlSentAt = new Map<number, number>();
   let reconnectTimer: number | null = null;
   let streamReconnectTimer: number | null = null;
   let rtcReconnectTimer: number | null = null;
+  let rtcDisconnectTimer: number | null = null;
   let frameAnimation: number | null = null;
   let pendingCameraFrame: Blob | null = null;
   let pendingCamera2Frame: Blob | null = null;
@@ -120,8 +122,24 @@ export function useWebSocket() {
     return Math.max(0, Math.round(robotNow - ts * 1000));
   }
 
+  function reportLatencyMetrics(current: DebugMetrics) {
+    if (current.controlLatency === null && current.cameraLatency === null && current.camera2Latency === null) return;
+    void fetch("/api/logs/latency", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        controlLatencyMs: current.controlLatency,
+        cameraLatencyMs: current.cameraLatency,
+        camera2LatencyMs: current.camera2Latency,
+        controlFps: current.controlFps,
+        cameraFps: current.cameraFps,
+        camera2Fps: current.camera2Fps,
+      }),
+    }).catch(() => undefined);
+  }
+
   function updateMetrics() {
-    metrics.value = {
+    const updated = {
       ...metrics.value,
       controlFps: controlFrames,
       cameraFps: cameraFrames,
@@ -129,6 +147,8 @@ export function useWebSocket() {
       camera2Fps: camera2Frames,
       camera2Dropped,
     };
+    metrics.value = updated;
+    reportLatencyMetrics(updated);
     controlFrames = cameraFrames = camera2Frames = 0;
     cameraDropped = camera2Dropped = 0;
   }
@@ -281,6 +301,10 @@ export function useWebSocket() {
   }
 
   function closeRtc(scheduleReconnect = false) {
+    if (rtcDisconnectTimer !== null) {
+      clearTimeout(rtcDisconnectTimer);
+      rtcDisconnectTimer = null;
+    }
     rtcStateOpen = false;
     const hadVideo = rtcVideoOpen;
     rtcVideoOpen = false;
@@ -363,7 +387,15 @@ export function useWebSocket() {
         if (mid !== null) installTrack(mid, event.track);
       };
       peer.onconnectionstatechange = () => {
-        if (["failed", "closed", "disconnected"].includes(peer.connectionState)) {
+        if (peer.connectionState === "connected" && rtcDisconnectTimer !== null) {
+          clearTimeout(rtcDisconnectTimer);
+          rtcDisconnectTimer = null;
+        } else if (peer.connectionState === "disconnected" && rtcDisconnectTimer === null) {
+          rtcDisconnectTimer = window.setTimeout(() => {
+            rtcDisconnectTimer = null;
+            if (rtcPeer === peer && peer.connectionState === "disconnected") closeRtc(!disposed);
+          }, 3000);
+        } else if (["failed", "closed"].includes(peer.connectionState)) {
           closeRtc(!disposed);
         }
       };
@@ -406,7 +438,17 @@ export function useWebSocket() {
         break;
       case "teleop_observation":
         controlFrames += 1;
-        metrics.value.controlLatency = latency(msg.ts);
+        if (typeof msg.applied_seq === "number") {
+          const sentAt = controlSentAt.get(msg.applied_seq);
+          if (sentAt !== undefined) {
+            metrics.value.controlLatency = Math.round(performance.now() - sentAt);
+            for (const sequence of controlSentAt.keys()) {
+              if (sequence <= msg.applied_seq) controlSentAt.delete(sequence);
+            }
+          }
+        } else {
+          metrics.value.controlLatency = latency(msg.ts);
+        }
         if (msg.leader) leaderJoints.value = msg.leader;
         if (msg.follower) followerJoints.value = msg.follower;
         break;
@@ -437,16 +479,19 @@ export function useWebSocket() {
   }
 
   function send(msg: object) {
-    if (
-      (msg as WSMessage).type === "action"
-      && rtcControl?.readyState === "open"
-      && rtcControl.bufferedAmount < 64 * 1024
-    ) {
-      rtcControl.send(JSON.stringify({ ...msg, seq: ++rtcSequence, sent_at_ms: Date.now() }));
-      return;
+    let payload = msg;
+    if ((msg as WSMessage).type === "action") {
+      const sequence = ++rtcSequence;
+      payload = { ...msg, seq: sequence, sent_at_ms: Date.now() };
+      controlSentAt.set(sequence, performance.now());
+      if (controlSentAt.size > 240) controlSentAt.delete(controlSentAt.keys().next().value!);
+      if (rtcControl?.readyState === "open" && rtcControl.bufferedAmount < 64 * 1024) {
+        rtcControl.send(JSON.stringify(payload));
+        return;
+      }
     }
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(msg));
+      ws.send(JSON.stringify(payload));
     }
   }
 
@@ -468,6 +513,7 @@ export function useWebSocket() {
     if (reconnectTimer) clearTimeout(reconnectTimer);
     if (streamReconnectTimer) clearTimeout(streamReconnectTimer);
     if (rtcReconnectTimer) clearTimeout(rtcReconnectTimer);
+    if (rtcDisconnectTimer) clearTimeout(rtcDisconnectTimer);
     if (frameAnimation !== null) cancelAnimationFrame(frameAnimation);
     if (metricsTimer !== null) clearInterval(metricsTimer);
     if (pingTimer !== null) clearInterval(pingTimer);
