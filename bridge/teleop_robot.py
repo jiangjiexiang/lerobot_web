@@ -2,18 +2,16 @@
 """
 LeRobot SO-101 串口驱动。
 
-同时连接 Leader 和 Follower，或接受 ROS 2 适配层经 stdin 发送的动作。
-文件名为兼容既有启动配置暂时保留；当前不加载或运行 MuJoCo。
+同时连接 Leader 和 Follower，或接受网页经 stdin 发送的动作。
 
 用法:
-    python teleop_mujoco.py \
+    python teleop_robot.py \
         --follower-port /dev/ttyACM0 --follower-id R12253102 \
         --leader-port /dev/ttyACM1  --leader-id R07253102 \
-        [--fps 30] [--viewer]
+        [--fps 30]
 """
 
 import argparse
-import base64
 import json
 import logging
 import os
@@ -22,7 +20,6 @@ import sys
 import threading
 import time
 
-import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../lerobot/src"))
@@ -39,6 +36,7 @@ class RemoteLeaderInput:
     def __init__(self):
         self._lock = threading.Lock()
         self._joints: dict[str, float] | None = None
+        self._sequence: int | None = None
         self._updated_at = 0.0
         threading.Thread(target=self._read_loop, daemon=True).start()
 
@@ -54,40 +52,17 @@ class RemoteLeaderInput:
                     continue
                 with self._lock:
                     self._joints = values
+                    sequence = msg.get("seq")
+                    self._sequence = sequence if isinstance(sequence, int) and sequence >= 0 else None
                     self._updated_at = time.monotonic()
             except (ValueError, TypeError, json.JSONDecodeError):
                 continue
 
-    def latest(self, timeout_s: float) -> dict | None:
+    def latest(self, timeout_s: float) -> tuple[dict, int | None] | None:
         with self._lock:
             if self._joints is None or time.monotonic() - self._updated_at > timeout_s:
                 return None
-            return dict(self._joints)
-
-
-class CameraCapture:
-    """机器人电脑本地摄像头采集；失败不影响遥操作主循环。"""
-    def __init__(self, index: int, width: int = 960, height: int = 540):
-        self.cap = cv2.VideoCapture(index)
-        self.available = self.cap.isOpened()
-        if self.available:
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        else:
-            logger.warning(f"摄像头 {index} 不可用，继续运行但不输出摄像头画面")
-
-    def read_jpeg(self) -> bytes | None:
-        if not self.available:
-            return None
-        ok, frame = self.cap.read()
-        if not ok:
-            return None
-        ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        return jpeg.tobytes() if ok else None
-
-    def release(self):
-        if self.cap.isOpened():
-            self.cap.release()
+            return dict(self._joints), self._sequence
 
 
 def load_calibration(robot_type: str, robot_id: str) -> dict:
@@ -139,18 +114,9 @@ def main():
     parser.add_argument("--leader-port", type=str, default="", help="Leader 串口")
     parser.add_argument("--leader-id", type=str, default="", help="Leader ID")
     parser.add_argument("--fps", type=int, default=60, help="控制循环频率")
-    parser.add_argument("--stream-fps", type=int, default=20, help="网页 MuJoCo 画面最大帧率（与控制频率独立）")
-    parser.add_argument("--stream-jpeg-quality", type=int, default=82, help="网页 MuJoCo JPEG 质量（1-100）")
-    parser.add_argument("--viewer", action="store_true", help="打开 MuJoCo 交互式查看器")
+    parser.add_argument("--observation-fps", type=int, default=30, help="Follower 状态读取频率")
     parser.add_argument("--remote-leader", action="store_true", help="从 stdin 接收网页 Leader 动作")
-    parser.add_argument(
-        "--external-command",
-        action="store_true",
-        help="Follower 只执行 stdin 动作；Leader 仍只读并作为观测输出（供 ROS 2 适配层使用）",
-    )
     parser.add_argument("--command-timeout", type=float, default=0.15, help="远程动作超时秒数")
-    parser.add_argument("--camera-index", type=int, default=-1, help="摄像头索引；-1 禁用")
-    parser.add_argument("--camera-fps", type=int, default=15, help="摄像头最大帧率")
     args = parser.parse_args()
 
     # === 连接 Follower ===
@@ -170,7 +136,7 @@ def main():
     logger.info("Follower 电机配置完成 (位置模式)")
 
     # === 连接 Leader / 接收远程 Leader ===
-    command_input = RemoteLeaderInput() if args.remote_leader or args.external_command else None
+    command_input = RemoteLeaderInput() if args.remote_leader else None
     leader_bus = None
     if args.remote_leader:
         leader_has_calib = True
@@ -183,8 +149,6 @@ def main():
         leader_bus.connect()
         leader_bus.disable_torque()
         logger.info(f"Leader 连接成功 (仅读取模式, 标定: {'有' if leader_has_calib else '无'})")
-        if args.external_command:
-            logger.info("外部命令模式：Leader 只发布观测，Follower 仅执行 stdin 命令")
 
     def shutdown_from_signal(signum, _frame):
         """Node 停止子进程时确保从臂不再保持扭矩。"""
@@ -206,57 +170,40 @@ def main():
     # 无标定时用原始编码器值
     use_raw = not (follower_has_calib and leader_has_calib)
     if use_raw:
-        if args.external_command:
-            follower_bus.disable_torque()
-            follower_bus.disconnect(disable_torque=False)
-            if leader_bus is not None:
-                leader_bus.disconnect()
-            parser.error("ROS 2 外部命令模式要求 Leader 和 Follower 标定完整，拒绝使用原始编码器单位")
         logger.warning("无标定文件，使用原始编码器值 (0-4095)")
 
     period = 1.0 / args.fps
     frame_count = 0
     logger.info(f"控制频率: {args.fps} FPS")
-    camera = CameraCapture(args.camera_index) if args.camera_index >= 0 else None
-    if camera and camera.available:
-        logger.info(f"摄像头 {args.camera_index} 初始化成功（最大 {args.camera_fps} FPS）")
-    next_camera_frame = 0.0
-
-    def emit_camera_frame():
-        nonlocal next_camera_frame
-        if camera is None or not camera.available or time.monotonic() < next_camera_frame:
-            return
-        next_camera_frame = time.monotonic() + 1.0 / max(1, args.camera_fps)
-        jpeg = camera.read_jpeg()
-        if jpeg:
-            print(json.dumps({"type": "camera_frame", "data": base64.b64encode(jpeg).decode("ascii"), "ts": time.time()}), flush=True)
-
-    def get_leader_joints() -> dict:
-        if args.remote_leader:
-            return command_input.latest(args.command_timeout) or {}
-        return read_positions(leader_bus, normalize=not use_raw)
-
-    def get_follower_goal(leader_joints: dict) -> dict:
-        source = command_input.latest(args.command_timeout) if args.external_command else leader_joints
-        return {k: v for k, v in (source or {}).items() if k in follower_bus.motors}
+    observation_period = 1.0 / max(1, min(args.fps, args.observation_fps))
+    next_observation_at = 0.0
 
     logger.info("开始遥操作循环")
     try:
         while True:
             loop_start = time.perf_counter()
-            leader_joints = get_leader_joints()
-            goal_pos = get_follower_goal(leader_joints)
+            remote_command = command_input.latest(args.command_timeout) if args.remote_leader else None
+            leader_joints = remote_command[0] if remote_command else (
+                {} if args.remote_leader else read_positions(leader_bus, normalize=not use_raw)
+            )
+            follower_command = remote_command if args.remote_leader else (leader_joints, None)
+            source_joints = follower_command[0] if follower_command else {}
+            applied_sequence = follower_command[1] if follower_command else None
+            goal_pos = {k: v for k, v in source_joints.items() if k in follower_bus.motors}
             if goal_pos:
                 write_positions(follower_bus, goal_pos, normalize=not use_raw)
-            follower_joints = read_positions(follower_bus, normalize=not use_raw)
-            print(json.dumps({
-                "type": "teleop_observation",
-                "leader": leader_joints,
-                "follower": follower_joints,
-                "ts": time.time(),
-            }), flush=True)
-            emit_camera_frame()
-
+            if time.perf_counter() >= next_observation_at:
+                next_observation_at = loop_start + observation_period
+                follower_joints = read_positions(follower_bus, normalize=not use_raw)
+                observation = {
+                    "type": "teleop_observation",
+                    "leader": leader_joints,
+                    "follower": follower_joints,
+                    "ts": time.time(),
+                }
+                if applied_sequence is not None:
+                    observation["applied_seq"] = applied_sequence
+                print(json.dumps(observation), flush=True)
             sleep_time = period - (time.perf_counter() - loop_start)
             if sleep_time > 0:
                 time.sleep(sleep_time)
@@ -269,8 +216,6 @@ def main():
     # 清理
     follower_bus.disable_torque()
     follower_bus.disconnect()
-    if camera is not None:
-        camera.release()
     if leader_bus is not None:
         leader_bus.disconnect()
     logger.info("已断开所有连接")

@@ -1,56 +1,54 @@
 <template>
   <main class="workspace">
-    <header class="workspace-head">
-      <div><p class="eyebrow">DATA LIBRARY</p><h2>数据资产</h2><span>浏览、审核并管理机器人采集数据</span></div>
-      <button class="icon-button" title="刷新数据目录" :disabled="loading" @click="loadDatasets(true)">刷新</button>
-    </header>
-
-    <section class="kpis" aria-label="数据概览">
-      <div><small>数据集</small><strong>{{ datasets.length }}</strong><span>{{ totalFrames.toLocaleString() }} 帧</span></div>
-      <div><small>Episodes</small><strong>{{ totalEpisodes }}</strong><span>{{ totalDuration }}</span></div>
-      <div><small>审核进度</small><strong>{{ reviewRate }}%</strong><span>{{ reviewedEpisodes }} 已完成</span></div>
-      <div><small>待审核</small><strong :class="{ alert: pendingReviewCount > 0 }">{{ pendingReviewCount }}</strong><span>{{ reviewRate }}% 审核完成</span></div>
-    </section>
-
     <div v-if="error" class="workspace-error">{{ error }}<button @click="loadDatasets(true)">重试</button></div>
     <div v-if="loading && datasets.length === 0" class="catalog-skeleton"><i v-for="item in 3" :key="item"></i></div>
     <div v-else-if="!loading && datasets.length === 0" class="empty">尚无已保存的数据集</div>
 
     <template v-else>
-      <section v-if="!selectedDataset" class="catalog-view">
-        <header class="catalog-heading">
-          <div><strong>数据资产</strong><small :title="root">{{ root || "本地目录" }}</small></div>
-          <label><span>⌕</span><input v-model="datasetQuery" placeholder="搜索数据集…" /></label>
-        </header>
-        <div class="dataset-grid">
-          <article v-for="item in filteredDatasets" :key="item.name" class="dataset-card">
-            <button class="card-open" @click="selectDataset(item)">
-              <span class="card-icon">D</span>
-              <span class="card-title">{{ item.name }}</span>
-              <span class="card-type">{{ item.robotType || "LeRobot Dataset" }}</span>
-              <span class="card-stats"><b>{{ item.totalEpisodes }}</b> Episodes <i></i><b>{{ item.totalFrames.toLocaleString() }}</b> 帧</span>
-              <span class="card-tags"><em>{{ item.fps }} FPS</em><em>{{ item.cameras.length }} 路相机</em></span>
-              <span class="review-meter"><i class="approved" :style="{ width: reviewWidth(item, 'approved') }"></i><i class="rejected" :style="{ width: reviewWidth(item, 'rejected') }"></i></span>
-              <span class="card-foot"><small>更新于 {{ formatDate(item.modifiedAt) }}</small><b>查看详情 →</b></span>
-            </button>
-            <button class="card-delete" :aria-label="`删除数据集 ${item.name}`" title="删除数据集" @click="openDeleteDataset(item)">•••</button>
-          </article>
-          <div v-if="filteredDatasets.length === 0" class="no-results">没有匹配的数据集</div>
+      <section v-if="!selectedDataset" class="manager-view">
+        <nav class="project-tabs" aria-label="项目筛选">
+          <span>选择项目：</span><button :class="{ active: projectFilter === 'all' }" @click="projectFilter = 'all'">全部项目</button><button :class="{ active: projectFilter === 'captured' }" @click="projectFilter = 'captured'">采集数据</button><button :class="{ active: projectFilter === 'pending' }" @click="projectFilter = 'pending'">待审核</button><button :class="{ active: projectFilter === 'published' }" @click="projectFilter = 'published'">已发布</button>
+          <span v-if="demoMode" class="demo-badge">演示数据</span><span class="catalog-root" :title="root">{{ root || "本地数据目录" }}</span>
+        </nav>
+        <div class="manager-tools">
+          <label><input v-model="datasetQuery" placeholder="数据名称" aria-label="数据名称" /></label>
+          <label><select v-model="datasetType" aria-label="机器人类型"><option value="all">全部机器人</option><option value="lerobot">LeRobot</option></select></label>
+          <label><select v-model="reviewFilter" aria-label="审核筛选"><option value="all">全部状态</option><option value="pending">未审核</option><option value="reviewed">已审核</option></select></label>
+          <button class="search-button" @click="loadDatasets(true)">搜索</button><button class="text-button" @click="clearManagerFilters">重置</button>
+          <span class="tool-spacer"></span><button class="filter-chip">已分配</button><button class="filter-chip">已标注</button>
         </div>
+        <div v-if="selectedDatasetNames.size" class="manager-selection"><span>已选 {{ selectedDatasetNames.size }} 项</span><button @click="selectedDatasetNames.clear()">取消选择</button></div>
+        <div class="data-table-wrap">
+          <table class="data-table">
+            <thead><tr><th><input type="checkbox" :checked="allDatasetsSelected" aria-label="选择全部数据集" @change="toggleAllDatasets" /></th><th>数据名称</th><th>机器人</th><th>Episodes</th><th>帧数</th><th>相机</th><th>上传时间</th><th>审核状态</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr v-for="item in managerDatasets" :key="item.name">
+                <td><input type="checkbox" :checked="selectedDatasetNames.has(item.name)" :aria-label="`选择 ${item.name}`" @change="toggleDatasetSelected(item.name)" /></td>
+                <td><button class="dataset-link" @click="selectDataset(item)">{{ item.name }}</button><small>{{ item.fps }} FPS · {{ item.totalEpisodes }} 段采集</small></td>
+                <td><span class="project-tag">{{ item.robotType || "LeRobot" }}</span></td><td>{{ item.totalEpisodes }}</td><td>{{ item.totalFrames.toLocaleString() }}</td><td>{{ item.cameras.length }} 路</td><td>{{ formatDate(item.modifiedAt) }}</td>
+                <td><span :class="['review-pill', datasetReviewState(item)]">{{ datasetReviewText(item) }}</span></td>
+                <td><button class="row-action" @click="selectDataset(item)">查看 <span>›</span></button><button class="row-menu" :aria-label="`管理 ${item.name}`" @click="openDeleteDataset(item)">•••</button></td>
+              </tr>
+              <tr v-if="managerDatasets.length === 0"><td colspan="9" class="no-results">没有符合筛选条件的数据</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <footer class="manager-footer"><span>共 {{ managerDatasets.length }} 条数据</span><span>本地存储 {{ root || "-" }}</span><div><button disabled>‹</button><strong>1</strong><button disabled>›</button></div></footer>
+        <div class="manager-actions"><button title="刷新目录" @click="loadDatasets(true)">↻<span>刷新</span></button><button :disabled="!selectedDatasetNames.size" @click="selectedDatasetNames.clear()">×<span>取消选择</span></button><button :disabled="!selectedDatasetNames.size" @click="deleteSelectedDataset">⌫<span>删除</span></button></div>
       </section>
 
       <template v-else>
       <div class="dataset-context">
-        <button @click="closeDataset">← 返回数据资产</button>
-        <div><strong>{{ selectedDataset.name }}</strong><small>{{ selectedDataset.robotType || "LeRobot Dataset" }} · {{ selectedDataset.totalEpisodes }} Episodes · {{ selectedDataset.cameras.length }} 路相机</small></div>
-        <div class="context-actions"><span :class="{ loading: detailLoading }">{{ detailLoading ? "正在加载索引…" : "索引已就绪" }}</span><button class="danger-button" @click="openDeleteDataset(selectedDataset)">删除数据集</button></div>
+        <button @click="closeDataset">← 返回列表</button>
+        <div><strong>{{ selectedDataset.name }}</strong><small>{{ selectedDataset.robotType || "机器人数据" }} · {{ selectedDataset.totalEpisodes }} 段采集 · {{ selectedDataset.cameras.length }} 路相机</small></div>
+        <div class="context-actions"><span :class="{ loading: detailLoading }">{{ detailLoading ? "正在读取…" : "读取完成" }}</span><button class="danger-button" @click="openDeleteDataset(selectedDataset)">删除</button></div>
       </div>
       <div class="data-layout">
 
       <section class="episode-list" aria-label="Episode 列表">
-        <div class="pane-title episode-title"><strong>Episodes</strong><small>{{ filteredEpisodes.length }} / {{ episodes.length }}</small></div>
+        <div class="pane-title episode-title"><strong>采集片段</strong><small>{{ filteredEpisodes.length }} / {{ episodes.length }}</small></div>
         <div class="episode-tools">
-          <label class="search"><span>⌕</span><input v-model="query" aria-label="搜索 Episode" placeholder="搜索编号、任务、标签" /></label>
+          <label class="search"><span>⌕</span><input v-model="query" aria-label="搜索采集片段" placeholder="搜索编号、任务、标签" /></label>
           <div class="tool-row">
             <select v-model="filter" aria-label="审核状态">
               <option v-for="item in filters" :key="item.value" :value="item.value">{{ item.label }}</option>
@@ -92,9 +90,9 @@
         </div>
         <template v-else>
         <div class="detail-tabs" role="tablist">
-          <button :class="{ active: detailView === 'episode' }" @click="detailView = 'episode'">回放审核</button>
-          <button :class="{ active: detailView === 'collections' }" @click="detailView = 'collections'">训练选集 <span>{{ collections.length }}</span></button>
-          <button :class="{ active: detailView === 'audit' }" @click="detailView = 'audit'">操作记录</button>
+          <button :class="{ active: detailView === 'episode' }" @click="detailView = 'episode'">审核</button>
+          <button :class="{ active: detailView === 'collections' }" @click="detailView = 'collections'">训练数据 <span>{{ collections.length }}</span></button>
+          <button :class="{ active: detailView === 'audit' }" @click="detailView = 'audit'">记录</button>
         </div>
         <template v-if="detailView === 'episode' && selectedEpisode">
         <div class="review-head">
@@ -103,7 +101,7 @@
         </div>
 
         <div class="quality-panel" :class="{ warning: selectedEpisode.quality.flags.length }">
-          <div><small>自动质量检查</small><strong>{{ selectedEpisode.quality.score }} / 100</strong></div>
+          <div><small>画面检查</small><strong>{{ selectedEpisode.quality.score }} / 100</strong></div>
           <span>{{ selectedEpisode.quality.cameraCoverage }} / {{ selectedEpisode.quality.expectedCameras }} 路视频</span>
           <ul v-if="selectedEpisode.quality.flags.length"><li v-for="flag in selectedEpisode.quality.flags" :key="flag.code">{{ flag.label }}</li></ul>
           <p v-else>帧数与视频通道检查通过</p>
@@ -185,7 +183,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 
 type ReviewStatus = "unreviewed" | "approved" | "rejected";
 interface Review { status: ReviewStatus; tags: string[]; notes: string; assignee?: string; reviewer?: string; qualityFlags?: string[]; createdAt?: string; updatedAt?: string }
@@ -212,6 +210,11 @@ const qualityFilter = ref<"all" | "issues" | "clean">("all");
 const sort = ref("episode-asc");
 const query = ref("");
 const datasetQuery = ref("");
+const datasetType = ref("all");
+const reviewFilter = ref("all");
+const projectFilter = ref<"all" | "captured" | "pending" | "published">("all");
+const selectedDatasetNames = reactive(new Set<string>());
+const demoMode = ref(false);
 const syncEnabled = ref(true);
 const videos = ref<HTMLVideoElement[]>([]);
 const videoErrors = reactive(new Set<string>());
@@ -233,6 +236,21 @@ const reviewStates: { value: ReviewStatus; label: string }[] = [
   { value: "approved", label: "通过" },
   { value: "rejected", label: "拒绝" },
 ];
+const demoDatasets: DatasetSummary[] = [
+  { name: "pick_place_blocks_2026_08_03", robotType: "SO-101 双臂", fps: 30, totalEpisodes: 48, totalFrames: 17280, cameras: ["camera", "camera2"], modifiedAt: "2026-08-03T09:42:00+08:00", reviews: { unreviewed: 16, approved: 30, rejected: 2 } },
+  { name: "sort_objects_tabletop_2026_08_02", robotType: "SO-101 双臂", fps: 30, totalEpisodes: 36, totalFrames: 12960, cameras: ["camera", "camera2"], modifiedAt: "2026-08-02T16:20:00+08:00", reviews: { unreviewed: 12, approved: 23, rejected: 1 } },
+  { name: "drawer_open_close_2026_08_01", robotType: "SO-101", fps: 15, totalEpisodes: 24, totalFrames: 5400, cameras: ["camera", "camera2"], modifiedAt: "2026-08-01T11:08:00+08:00", reviews: { unreviewed: 24, approved: 0, rejected: 0 } },
+  { name: "cable_insert_baseline", robotType: "SO-101", fps: 30, totalEpisodes: 18, totalFrames: 6480, cameras: ["camera", "camera2"], modifiedAt: "2026-07-31T14:35:00+08:00", reviews: { unreviewed: 3, approved: 14, rejected: 1 } },
+];
+const demoEpisodes: Episode[] = Array.from({ length: 8 }, (_, episode) => ({
+  episode,
+  frames: 360,
+  duration: 12,
+  tasks: ["抓取方块并放入目标区域"],
+  videos: {},
+  quality: { score: episode === 5 ? 82 : 96, flags: episode === 5 ? [{ code: "camera-blur", level: "warning", label: "摄像头 2 存在短暂模糊" }] : [], cameraCoverage: 2, expectedCameras: 2 },
+  review: { status: episode < 5 ? "approved" : "unreviewed", tags: episode < 5 ? ["抓取", "成功"] : [], notes: "", assignee: "采集员", reviewer: episode < 5 ? "审核员" : "" },
+}));
 const totalEpisodes = computed(() => datasets.value.reduce((sum, item) => sum + item.totalEpisodes, 0));
 const totalFrames = computed(() => datasets.value.reduce((sum, item) => sum + item.totalFrames, 0));
 const reviewedEpisodes = computed(() => datasets.value.reduce((sum, item) => sum + item.reviews.approved + item.reviews.rejected, 0));
@@ -245,6 +263,15 @@ const filteredDatasets = computed(() => {
   const needle = datasetQuery.value.trim().toLocaleLowerCase();
   return needle ? datasets.value.filter((item) => `${item.name} ${item.robotType || ""}`.toLocaleLowerCase().includes(needle)) : datasets.value;
 });
+const managerDatasets = computed(() => filteredDatasets.value.filter((item) => {
+  if (datasetType.value === "lerobot" && !(item.robotType || "LeRobot").toLocaleLowerCase().includes("lerobot")) return false;
+  const reviewed = item.reviews.approved + item.reviews.rejected;
+  if (projectFilter.value === "captured" && item.totalEpisodes === 0) return false;
+  if (projectFilter.value === "pending" && reviewed >= item.totalEpisodes) return false;
+  if (projectFilter.value === "published" && item.reviews.approved === 0) return false;
+  return reviewFilter.value === "all" || (reviewFilter.value === "pending" ? reviewed < item.totalEpisodes : reviewed > 0);
+}));
+const allDatasetsSelected = computed(() => managerDatasets.value.length > 0 && managerDatasets.value.every((item) => selectedDatasetNames.has(item.name)));
 const approvedCount = computed(() => episodes.value.filter((item) => item.review.status === "approved").length);
 const filteredEpisodes = computed(() => {
   const needle = query.value.trim().toLocaleLowerCase();
@@ -263,6 +290,12 @@ function formatDuration(seconds: number) { const total = Math.max(0, Math.round(
 function formatDate(value?: string) { if (!value) return "-"; return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
 function cameraLabel(camera: string, index: number) { return camera.split(".").pop()?.replace("camera", "摄像头 ") || `摄像头 ${index + 1}`; }
 function reviewWidth(item: DatasetSummary, status: ReviewStatus) { return item.totalEpisodes ? `${(item.reviews[status] || 0) / item.totalEpisodes * 100}%` : "0%"; }
+function datasetReviewState(item: DatasetSummary) { const reviewed = item.reviews.approved + item.reviews.rejected; return reviewed >= item.totalEpisodes && item.totalEpisodes > 0 ? "reviewed" : reviewed ? "partial" : "pending"; }
+function datasetReviewText(item: DatasetSummary) { const reviewed = item.reviews.approved + item.reviews.rejected; return reviewed >= item.totalEpisodes && item.totalEpisodes > 0 ? "已审核" : reviewed ? `已审核 ${reviewed}/${item.totalEpisodes}` : "未审核"; }
+function toggleDatasetSelected(name: string) { selectedDatasetNames.has(name) ? selectedDatasetNames.delete(name) : selectedDatasetNames.add(name); }
+function toggleAllDatasets() { if (allDatasetsSelected.value) managerDatasets.value.forEach((item) => selectedDatasetNames.delete(item.name)); else managerDatasets.value.forEach((item) => selectedDatasetNames.add(item.name)); }
+function clearManagerFilters() { datasetQuery.value = ""; datasetType.value = "all"; reviewFilter.value = "all"; projectFilter.value = "all"; }
+function deleteSelectedDataset() { const target = datasets.value.find((item) => selectedDatasetNames.has(item.name)); if (target) openDeleteDataset(target); }
 function tagsFrom(value: string) { return value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean); }
 function auditAction(action: string) { return ({ "review.update": "更新审核", "review.batch": "批量审核", "collection.publish": "发布训练选集", "collection.delete": "删除训练选集" } as Record<string, string>)[action] || action; }
 function auditSummary(entry: AuditEntry) {
@@ -285,18 +318,26 @@ async function loadDatasets(refresh = false) {
   loading.value = true; error.value = null;
   try {
     const data = await requestJson(`/api/datasets${refresh ? "?refresh=1" : ""}`);
-    datasets.value = data.datasets || []; root.value = data.root || "";
+    datasets.value = data.datasets || []; root.value = data.root || ""; demoMode.value = false;
+    if (!datasets.value.length) { datasets.value = demoDatasets; root.value = "本地演示目录"; demoMode.value = true; }
     if (selectedDataset.value) {
       selectedDataset.value = datasets.value.find((item) => item.name === selectedDataset.value?.name) || null;
     }
-    if (!datasets.value.length) { selectedDataset.value = null; selectedEpisode.value = null; episodes.value = []; }
-  } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); }
+  } catch {
+    datasets.value = demoDatasets; root.value = "本地演示目录"; demoMode.value = true;
+  }
   finally { loading.value = false; }
 }
 
 async function selectDataset(item: DatasetSummary) {
   const requestId = ++detailRequest;
   selectedDataset.value = item; selectedEpisode.value = null; selectedIds.clear(); error.value = null; detailLoading.value = true;
+  writeDatasetHash(item.name);
+  if (demoMode.value) {
+    episodes.value = demoEpisodes.map((episode) => ({ ...episode, review: { ...episode.review, tags: [...episode.review.tags] }, quality: { ...episode.quality, flags: [...episode.quality.flags] } }));
+    selectEpisode(episodes.value[0]); detailLoading.value = false;
+    return;
+  }
   try {
     const data = await requestJson(`/api/datasets/${encodeURIComponent(item.name)}`);
     if (requestId !== detailRequest) return;
@@ -311,6 +352,7 @@ function closeDataset() {
   detailRequest += 1;
   selectedDataset.value = null; selectedEpisode.value = null; episodes.value = [];
   collections.value = []; auditEntries.value = []; selectedIds.clear(); detailLoading.value = false;
+  history.replaceState(null, "", `${location.pathname}${location.search}#datasets`);
 }
 
 async function loadDatasetOperations(dataset: string) {
@@ -429,7 +471,31 @@ async function deleteCollection(item: TrainingCollection) {
   finally { saving.value = false; }
 }
 
-onMounted(loadDatasets);
+function datasetFromHash(): string | null {
+  if (!location.hash.startsWith("#datasets/")) return null;
+  try { return decodeURIComponent(location.hash.slice("#datasets/".length)); }
+  catch { return null; }
+}
+
+function writeDatasetHash(name: string) {
+  history.replaceState(null, "", `${location.pathname}${location.search}#datasets/${encodeURIComponent(name)}`);
+}
+
+async function openDatasetFromHash() {
+  const name = datasetFromHash();
+  if (!name) return;
+  const dataset = datasets.value.find((item) => item.name === name);
+  if (dataset && selectedDataset.value?.name !== dataset.name) await selectDataset(dataset);
+}
+
+function onHashChange() { void openDatasetFromHash(); }
+
+onMounted(async () => {
+  await loadDatasets();
+  await openDatasetFromHash();
+  window.addEventListener("hashchange", onHashChange);
+});
+onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
 </script>
 
 <style scoped>
@@ -476,4 +542,26 @@ onMounted(loadDatasets);
 .confirm-dialog { display:grid;grid-template-columns:38px 1fr;gap:15px;width:min(480px,100%);padding:22px;border:1px solid #3a2428;border-radius:14px;background:#0d0d0d;box-shadow:0 28px 90px #000; }
 .danger-mark { display:grid;place-items:center;width:36px;height:36px;border-radius:50%;background:#291217;color:#ff7585;font-weight:800; }.confirm-dialog h3 { margin-top:3px;font-size:18px; }.confirm-dialog > p,.confirm-dialog > label,.confirm-actions { grid-column:1/-1; }.confirm-dialog > p { color:#a1a1aa;font-size:11px;line-height:1.6; }.confirm-dialog > p strong { color:#fff; }.confirm-dialog label { display:grid;gap:7px;color:#a1a1aa;font-size:10px; }.confirm-dialog input { padding:10px;border:1px solid #363636;border-radius:7px;outline:0;background:#050505;color:#fff; }.confirm-dialog input:focus { border-color:#7c3f49; }
 .confirm-actions { display:flex;justify-content:flex-end;gap:8px;margin-top:3px; }.confirm-actions button { padding:8px 13px;border:1px solid #303030;border-radius:7px;background:#171717;color:#d4d4d8;cursor:pointer; }.confirm-actions .confirm-delete { border-color:#71303a;background:#c23e50;color:#fff; }.confirm-actions button:disabled { opacity:.35;cursor:not-allowed; }
+
+/* Table-first data manager. The detail reviewer below remains available from each row. */
+.workspace { max-width:none; padding:22px 36px 28px; background:#f5f6f6; color:#323437; }
+.manager-view { overflow:hidden; border:1px solid #dedfe0; border-radius:7px; background:#fff; box-shadow:0 1px 2px rgba(20,25,27,.04); }
+.project-tabs { display:flex; align-items:center; gap:24px; min-height:56px; padding:0 18px; border-bottom:1px solid #e2e3e4; white-space:nowrap; overflow-x:auto; }
+.project-tabs > span:first-child { color:#666a6d; font-size:12px; }.project-tabs button { align-self:stretch; border:0; border-bottom:2px solid transparent; padding:0 3px; background:transparent; color:#686c6f; font-size:13px; cursor:pointer; }.project-tabs button.active { border-color:#4d7bd8; color:#376dce; font-weight:700; }
+.catalog-root { margin-left:auto; overflow:hidden; color:#9a9da0; font-size:10px; text-overflow:ellipsis; }
+.demo-badge { padding:4px 8px; border:1px solid #d9c68e; border-radius:10px; color:#8c6a19; background:#fff9e9; font-size:10px; }
+.manager-tools { display:flex; align-items:center; gap:10px; padding:18px; border-bottom:1px solid #e5e6e7; }.manager-tools label { min-width:155px; }.manager-tools input,.manager-tools select { width:100%; height:36px; padding:0 10px; border:1px solid #d8dade; border-radius:5px; outline:0; background:#fff; color:#45484b; font-size:12px; }.manager-tools input:focus,.manager-tools select:focus { border-color:#6f98e2; box-shadow:0 0 0 3px rgba(77,123,216,.1); }
+.search-button,.text-button,.filter-chip { height:36px; padding:0 14px; border-radius:5px; cursor:pointer; font-size:12px; font-weight:650; }.search-button { border:1px solid #5e87d4; background:#fff; color:#3d72cb; }.text-button { border:0; background:transparent; color:#8c9093; }.tool-spacer { flex:1; }.filter-chip { border:1px solid #d5dfd8; background:#fbfffc; color:#4e8c69; }
+.manager-selection { display:flex; align-items:center; gap:12px; padding:8px 18px; border-bottom:1px solid #d7e5dc; background:#f3faf6; color:#397a5b; font-size:12px; }.manager-selection button { border:0; background:transparent; color:#397a5b; cursor:pointer; text-decoration:underline; }
+.data-table-wrap { overflow:auto; }.data-table { width:100%; min-width:950px; border-collapse:collapse; text-align:left; font-size:12px; }.data-table th { height:48px; padding:0 12px; border-bottom:1px solid #dfe1e2; color:#565a5d; font-weight:700; white-space:nowrap; }.data-table td { height:62px; padding:8px 12px; border-bottom:1px solid #e7e8e8; color:#55595c; vertical-align:middle; }.data-table tbody tr:hover { background:#f8faff; }.data-table th:first-child,.data-table td:first-child { width:42px; padding-right:0; text-align:center; }.data-table input[type="checkbox"] { width:18px; height:18px; accent-color:#4b7bda; }.dataset-link { display:block; max-width:260px; overflow:hidden; padding:0; border:0; background:transparent; color:#4475cf; cursor:pointer; font:inherit; font-weight:650; text-align:left; text-overflow:ellipsis; white-space:nowrap; }.data-table td small { display:block; margin-top:4px; color:#9b9ea1; font-size:10px; }.project-tag { display:inline-block; padding:5px 9px; border-radius:14px; background:#dceefd; color:#38739d; font-size:11px; }.review-pill { display:inline-block; padding:5px 8px; border-radius:12px; font-size:10px; white-space:nowrap; }.review-pill.pending { background:#f0f1f1; color:#777b7e; }.review-pill.partial { background:#fff3d9; color:#9a701f; }.review-pill.reviewed { background:#e6f6ed; color:#3d8a65; }.row-action { border:0; background:transparent; color:#4678d0; cursor:pointer; font-size:12px; font-weight:650; }.row-action span { margin-left:4px; font-size:17px; vertical-align:-1px; }.row-menu { margin-left:8px; border:0; background:transparent; color:#888c8f; cursor:pointer; letter-spacing:1px; }.no-results { padding:30px!important; color:#92969a!important; text-align:center; }
+.manager-footer { display:flex; align-items:center; gap:26px; min-height:52px; padding:0 18px; color:#818589; font-size:11px; }.manager-footer div { display:flex; align-items:center; gap:10px; margin-left:auto; }.manager-footer button { width:25px; height:25px; border:0; background:transparent; color:#a1a4a7; font-size:18px; }.manager-footer strong { display:grid; place-items:center; width:25px; height:25px; border-radius:4px; background:#eef3ff; color:#4677d0; }
+.manager-actions { display:flex; align-items:center; gap:29px; min-height:70px; padding:0 24px; border-top:1px solid #e4e5e6; background:#fff; }.manager-actions button { display:grid; grid-template-columns:auto; justify-items:center; gap:4px; min-width:40px; border:0; background:transparent; color:#65696c; cursor:pointer; font-size:21px; }.manager-actions button span { font-size:10px; }.manager-actions button:disabled { color:#c3c6c8; cursor:default; }
+@container (max-width:900px) { .workspace { padding:14px; }.manager-tools { flex-wrap:wrap; }.manager-tools label { flex:1 1 145px; }.tool-spacer { display:none; }.project-tabs { gap:17px; }.catalog-root { display:none; } }
+@container (max-width:520px) { .workspace { padding:8px; }.manager-tools { gap:7px; padding:12px; }.manager-tools label { min-width:100%; }.filter-chip { display:none; }.manager-footer { gap:10px; padding:0 12px; }.manager-footer > span:nth-child(2) { display:none; } }
+
+/* Detail view uses the same white data-table surface as the catalog. */
+.dataset-context,.data-layout,.episode-list,.review-pane,.publish-box { background:#fff; border-color:#dedfe0; color:#34373a; }.dataset-context button,.review-editor input,.review-editor textarea,.publish-box input,.batch-bar input,.episode-tools select,.batch-bar select { border-color:#d8dade; background:#fff; color:#3e4245; }.dataset-context small,.pane-title small,.episode-row small,.review-meta { color:#85898c; }.episode-row:hover,.episode-row.active,.job-row.active { background:#f5f8ff; }.review-pane { border-left:1px solid #e4e5e6; }.detail-tabs { border-color:#e1e2e3; }.detail-tabs button { color:#777b7e; }.detail-tabs button.active { border-color:#4a7bd1; color:#376dca; }.quality-panel { background:#f2faf6; border-color:#4ba77d; }.quality-panel.warning { background:#fff6e8; border-color:#db9b45; }.videos .video-channel { background:#f3f4f4; }.video-missing { background:#f4f5f5; color:#8c9093; }.review-editor { border-color:#e2e3e4; }.status-control button { border-color:#d7d9da; color:#62666a; }.status-control button.active { background:#eef4ff; color:#376dca; }.status-control button.approved.active { background:#e8f6ee; color:#32825d; }.status-control button.rejected.active { background:#fff0f1; color:#bd3c42; }.save-row button,.publish-box button { background:#3f78d1; color:#fff; }.collection-list article,.audit-list article { border-color:#e5e6e7; }.collection-list strong,.audit-list strong { color:#424649; }
+
+/* Dataset detail: a compact local-review tool, not a dashboard. */
+.dataset-context { grid-template-columns:auto minmax(0,1fr) auto; margin-bottom:12px; padding:13px 15px; border:1px solid #dedfe0; border-radius:7px; }.dataset-context > button { padding:7px 0; border:0; color:#3d72ca; background:transparent; font-size:12px; }.dataset-context strong { color:#303235; font-size:14px; }.dataset-context small { margin-top:4px; font-size:11px; }.context-actions .danger-button { padding:6px 9px!important; border:1px solid #f0c9cb!important; border-radius:5px!important; background:#fff!important; color:#c13d43!important; }.data-layout { min-height:620px; border:1px solid #dedfe0; border-radius:7px; overflow:hidden; }.episode-list { border-right:1px solid #e3e4e5; }.pane-title { min-height:52px; padding:12px 14px; border-bottom:1px solid #e5e6e7; background:#fafbfb; }.pane-title strong { color:#36393c; font-size:13px; }.episode-tools { padding:10px; border-bottom:1px solid #e6e7e8; background:#fff; }.search { border-color:#d9dbdd; background:#fff; }.search input { color:#45494c; }.tool-row select { border-color:#d9dbdd; background:#fff; color:#62666a; }.select-all { color:#74787b; }.episode-row { border-color:#e7e8e9; }.episode-row > button { color:#3e4245; }.episode-index { color:#3e74cd; }.episode-duration,.episode-task { color:#686d70; }.review-state,.quality-state { border-radius:10px; background:#f0f1f1; color:#74787b; }.review-state.approved { background:#e8f6ee; color:#34815e; }.quality-state.issue { background:#fff1ef; color:#bb5546; }.detail-tabs { margin:0 -14px 16px; padding:0 14px; background:#fafbfb; }.detail-tabs button { padding:12px 10px; font-size:12px; }.review-head h3 { color:#34373a; font-size:15px; }.review-head .eyebrow { color:#818589; letter-spacing:0; }.episode-facts span { border:0; border-radius:0; background:transparent; color:#74787b; font-size:11px; }.quality-panel { border-left-width:3px; border-radius:0; }.quality-panel small,.quality-panel span,.quality-panel p,.quality-panel li { color:#617067; font-size:10px; }.quality-panel strong { color:#327b5a; }.videos { border:1px solid #e0e2e3; }.video-missing { min-height:210px; }.review-editor { padding-top:15px; }.editor-heading strong { color:#3b3f42; font-size:13px; }.editor-heading label { color:#777b7e; }.review-editor > label,.people-fields label { color:#64686b; font-size:11px; }.review-editor input,.review-editor textarea { padding:8px; font-size:12px; }.save-row { justify-content:space-between; }.save-row button { padding:8px 14px; border-radius:5px; }
 </style>

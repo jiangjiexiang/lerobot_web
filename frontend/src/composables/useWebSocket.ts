@@ -1,7 +1,5 @@
 import { ref, onMounted, onUnmounted } from "vue";
 
-// ROS 2 drivers may expose different joint sets. The SO-101 Web Serial adapter
-// still emits its six canonical names, while the status UI accepts any driver.
 export type JointData = Record<string, number>;
 
 export interface WSMessage {

@@ -1,9 +1,0 @@
-/**:
-  ros__parameters:
-    # The executable exposes these as CLI arguments today. These names document
-    # the stable integration boundary for vendor-specific robot drivers.
-    leader_state_topic: /leader/joint_states
-    follower_state_topic: /follower/joint_states
-    command_topic: /follower/joint_trajectory_controller/joint_trajectory
-    camera1_topic: /camera1/image_raw/compressed
-    camera2_topic: /camera2/image_raw/compressed

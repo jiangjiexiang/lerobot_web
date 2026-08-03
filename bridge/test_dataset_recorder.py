@@ -15,7 +15,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 
 class DatasetRecorderTest(unittest.TestCase):
-    def test_records_dynamic_ros_joint_schema_and_two_videos(self) -> None:
+    def test_records_joint_schema_and_two_videos(self) -> None:
         image = np.zeros((48, 64, 3), dtype=np.uint8)
         image[:, :, 1] = 180
         ok, jpeg = cv2.imencode(".jpg", image)
@@ -52,7 +52,7 @@ class DatasetRecorderTest(unittest.TestCase):
                 "--task",
                 "synthetic",
                 "--robot-type",
-                "ros2_test",
+                "so101_test",
             ]
             for expected_episode in (0, 1):
                 result = subprocess.run(

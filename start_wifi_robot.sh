@@ -33,7 +33,7 @@ if ! [[ "$HOST_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
 fi
 CERT_DIR="$ROOT_DIR/.certs"
 
-if [[ ! -f "$CERT_DIR/lerobot-lan.crt" || ! -f "$CERT_DIR/lerobot-lan.key" ]]; then
+if [[ ! -f "$CERT_DIR/robot-lan.crt" || ! -f "$CERT_DIR/robot-lan.key" ]]; then
   "$ROOT_DIR/scripts/generate-lan-cert.sh" "$HOST_IP"
 fi
 
@@ -43,10 +43,10 @@ echo "=== 遥操作机器人端已就绪 ==="
 echo "操作电脑网页: https://$HOST_IP:5173"
 echo ""
 echo "将以下根证书导入操作电脑的‘受信任的根证书颁发机构’："
-echo "  $CERT_DIR/lerobot-lan-ca.crt"
+echo "  $CERT_DIR/robot-lan-ca.crt"
 echo ""
 
-export HTTPS_CERT="$CERT_DIR/lerobot-lan.crt"
-export HTTPS_KEY="$CERT_DIR/lerobot-lan.key"
+export HTTPS_CERT="$CERT_DIR/robot-lan.crt"
+export HTTPS_KEY="$CERT_DIR/robot-lan.key"
 export PORT="${PORT:-43127}"
 exec "$ROOT_DIR/start_robot.sh"

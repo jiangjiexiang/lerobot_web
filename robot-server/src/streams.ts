@@ -12,12 +12,11 @@ export class MJPEGStreamManager {
     // 为每个流设置 boundary 标识
     this.boundaries.set("camera", "boundary_camera");
     this.boundaries.set("camera2", "boundary_camera2");
-    this.boundaries.set("mujoco", "boundary_mujoco");
   }
 
   /**
    * 更新指定流的最新帧
-   * @param streamName 流名称 ("camera" | "camera2" | "mujoco")
+   * @param streamName 流名称 ("camera" | "camera2")
    * @param jpegBuffer JPEG 图片的 Buffer
    */
   updateFrame(streamName: string, jpegBuffer: Buffer): void {

@@ -2,8 +2,8 @@
   <div class="control-panel">
     <div class="section-heading">
       <div>
-        <p class="kicker">连接设置</p>
-        <h2>遥操作配置</h2>
+        <p class="kicker">设备控制</p>
+        <h2>机械臂连接</h2>
       </div>
       <button class="btn-refresh" title="重新检测串口" @click="$emit('refresh')">↻</button>
     </div>
@@ -27,10 +27,8 @@
       <div class="mode-options" role="group" aria-label="主臂连接方式">
         <button type="button" :class="{ active: local.controlMode === 'leader' }" @click="local.controlMode = 'leader'">Leader 串口</button>
         <button type="button" :class="{ active: local.controlMode === 'web' }" @click="local.controlMode = 'web'">网页 COM</button>
-        <button type="button" :class="{ active: local.controlMode === 'ros' }" @click="local.controlMode = 'ros'">ROS 2 话题</button>
       </div>
       <small v-if="local.controlMode === 'web'" class="field-note">操作电脑使用 HTTPS 的 Chrome / Edge 连接 Leader COM。</small>
-      <small v-else-if="local.controlMode === 'ros'" class="field-note">无需 Leader；启动后发布 JointTrajectory 到 Follower 命令话题。</small>
       <template v-else-if="local.controlMode === 'leader'">
         <label>Leader 串口 <span>主臂</span></label>
         <select v-model="local.leaderPort">
@@ -39,7 +37,7 @@
       </template>
     </div>
 
-    <div v-if="local.controlMode !== 'ros'" class="form-group">
+    <div class="form-group">
       <label>Leader ID</label>
       <input v-model="local.leaderId" placeholder="如 R07253102" />
     </div>
@@ -80,14 +78,14 @@
       <p v-if="serialError" class="serial-error">{{ serialError }}</p>
     </template>
 
-    <button class="btn btn-start" :disabled="running || busy || (local.controlMode === 'web' && !serialConnected)" @click="$emit('start', { ...local, remoteLeader: local.controlMode === 'web', commandSource: local.controlMode, viewer: false })">
+    <button class="btn btn-start" :disabled="running || busy || (local.controlMode === 'web' && !serialConnected)" @click="$emit('start', { ...local, remoteLeader: local.controlMode === 'web', commandSource: local.controlMode })">
       {{ busy && !running ? "正在启动…" : running ? "遥操作运行中" : "启动遥操作" }}
     </button>
     <button class="btn btn-stop" :disabled="!running || busy" @click="$emit('stop')">
       {{ busy && running ? "正在停止…" : "停止遥操作" }}
     </button>
 
-    <p class="hint">仿真功能已关闭，仅运行真实机器人控制和摄像头。</p>
+    <p class="hint">启动前请确认机械臂周围无障碍物。</p>
   </div>
 </template>
 
@@ -122,7 +120,7 @@ const local = reactive({
   cameraIndex: 0,
   camera2Index: 0,
   fps: 60,
-  controlMode: "leader" as "leader" | "web" | "ros",
+  controlMode: "leader" as "leader" | "web",
 });
 
 function selectCamera(view: "camera" | "camera2", index: number) {
@@ -172,9 +170,9 @@ watch(
   display: flex;
   flex-direction: column;
 }
-.section-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
-.kicker { color: #6db8d7; font-size: 10px; font-weight: 700; letter-spacing: 1.2px; }
-h2 { font-size: 18px; margin-top: 3px; letter-spacing: -0.25px;
+.section-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.kicker { color: #73777a; font-size: 11px; font-weight: 650; letter-spacing: 0; }
+h2 { color: #282a2d; font-size: 16px; margin-top: 3px; letter-spacing: 0;
 }
 .form-group {
   margin-bottom: 10px;
@@ -182,39 +180,37 @@ h2 { font-size: 18px; margin-top: 3px; letter-spacing: -0.25px;
 .form-group label {
   display: block;
   font-size: 12px;
-  color: #afc0d2;
+  color: #5f6366;
   margin-bottom: 3px;
 }
 .form-group select,
 .form-group input {
   width: 100%;
   padding: 7px 8px;
-  background: #0a1728;
-  border: 1px solid #29435f;
-  border-radius: 8px;
-  color: #edf5ff;
+  background: #fff;
+  border: 1px solid #dddedf;
+  border-radius: 5px;
+  color: #292b2e;
   font-size: 14px;
 }
-.form-group label span { color: #6f91aa; font-size: 11px; }
-.field-note { display: block; color: #7894ab; line-height: 1.4; margin-top: 5px; }
+.form-group label span { color: #8c9093; font-size: 11px; }
+.field-note { display: block; color: #7b8083; line-height: 1.4; margin-top: 5px; }
 .leader-mode { margin-bottom: 12px; }
-.mode-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; padding: 4px; border: 1px solid #29435f; border-radius: 9px; background: #0a1728; }
-.mode-options button { min-height: 34px; padding: 5px 6px; border: 0; border-radius: 6px; background: transparent; color: #8098ad; font-size: 12px; cursor: pointer; transition: background .18s, color .18s; }
-.mode-options button.active { color: #e7f9ff; background: #1b5273; box-shadow: 0 2px 8px rgba(0,0,0,.18); }
+.mode-options { display: grid; grid-template-columns: repeat(2, 1fr); gap: 5px; padding: 4px; border: 1px solid #dedfe0; border-radius: 6px; background: #f3f4f4; }
+.mode-options button { min-height: 34px; padding: 5px 6px; border: 0; border-radius: 4px; background: transparent; color: #777b7f; font-size: 12px; cursor: pointer; transition: background .18s, color .18s; }
+.mode-options button.active { color: #246f54; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
 .mode-options span { display: block; margin-top: 1px; color: inherit; font-size: 10px; opacity: .7; }
 .btn-refresh {
-  background: #102941;
-  border: 1px solid #315574;
-  color: #8dd4f4;
-  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #dedfe0;
+  color: #4a5054;
+  border-radius: 5px;
   width: 32px;
   height: 32px;
   font-size: 19px;
   cursor: pointer;
 }
-.btn-refresh:hover {
-  background: #183957;
-}
+.btn-refresh:hover { background: #f1f2f2; }
 .row2 {
   display: flex;
   gap: 8px;
@@ -225,7 +221,7 @@ h2 { font-size: 18px; margin-top: 3px; letter-spacing: -0.25px;
 .btn {
   padding: 10px;
   border: none;
-  border-radius: 9px;
+  border-radius: 5px;
   font-size: 15px;
   cursor: pointer;
   width: 100%;
@@ -233,27 +229,16 @@ h2 { font-size: 18px; margin-top: 3px; letter-spacing: -0.25px;
   font-weight: 600;
   transition: all 0.2s;
 }
-.btn-start {
-  background: linear-gradient(135deg, #28b97a, #28a99d);
-  color: #071a16;
-}
-.btn-start:hover {
-  background: linear-gradient(135deg, #43d99a, #41cbbc);
-}
-.btn-stop {
-  background: #f15d73;
-  color: #fff;
-}
-.btn-stop:hover {
-  background: #c73e54;
-}
-.btn-connect { background: #1c5c86; color: #e9f7ff; }
-.btn-disconnect { background: #495a6b; color: #f3f7fb; }
-.serial-error { color: #ff9aaa; font-size: 11px; margin-top: 7px; }
+.btn-start { background: #3f78d1; color: #fff; }
+.btn-start:hover { background: #2f64b4; }
+.btn-stop { background: #ed5155; color: #fff; }.btn-stop:hover { background: #d94146; }
+.btn-connect { background: #3f78d1; color: #fff; }.btn-disconnect { background: #6d7478; color: #fff; }
+.serial-error { color: #c9363b; font-size: 11px; margin-top: 7px; }
 .btn:disabled {
-  background: #26384c;
+  background: #e4e6e6;
+  color: #919598;
   cursor: not-allowed;
   opacity: 0.5;
 }
-.hint { margin-top: 12px; font-size: 11px; line-height: 1.5; color: #7690a8; }
+.hint { margin-top: 12px; font-size: 11px; line-height: 1.5; color: #85898c; }
 </style>

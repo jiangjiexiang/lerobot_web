@@ -55,10 +55,10 @@ function formatVal(v: number | undefined): string {
 <style scoped>
 h2 {
   font-size: 13px;
-  color: #888;
+  color: #3b3e41;
   margin-bottom: 12px;
   text-transform: uppercase;
-  letter-spacing: 1px;
+  letter-spacing: 0;
 }
 table {
   width: 100%;
@@ -68,16 +68,16 @@ table {
 th,
 td {
   padding: 5px 8px;
-  border-bottom: 1px solid #222;
+  border-bottom: 1px solid #e7e8e8;
   text-align: right;
 }
 th {
-  color: #888;
+  color: #8a8e91;
   text-align: center;
 }
 td:first-child,
 th:first-child {
   text-align: left;
-  color: #aaa;
+  color: #5f6366;
 }
 </style>

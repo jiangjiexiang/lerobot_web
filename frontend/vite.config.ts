@@ -17,7 +17,9 @@ logger.error = (message, options) => {
   const closedWebSocket = detail.includes("ws proxy socket error")
     && (detail.includes("socket has been ended by the other party")
       || detail.includes("writeAfterFIN")
-      || detail.includes("ERR_STREAM_WRITE_AFTER_END"));
+      || detail.includes("ERR_STREAM_WRITE_AFTER_END")
+      || detail.includes("ECONNRESET")
+      || detail.includes("EPIPE"));
   if (!closedWebSocket) logError(message, options);
 };
 

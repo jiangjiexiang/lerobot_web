@@ -73,7 +73,7 @@ class DatasetCompatibilityTests(unittest.TestCase):
                 repo_id="local/demo",
                 fps=30,
                 root=Path(directory),
-                robot_type="ros2",
+                robot_type="so101_follower",
                 features={},
                 streaming_encoding=True,
                 vcodec="h264",

@@ -24,7 +24,10 @@ interface RtcPeer {
   lastSequence: number;
   lastControlAt: number;
   closed: boolean;
+  disconnectTimer: NodeJS.Timeout | null;
 }
+
+export type ControlLossReason = "watchdog_timeout" | "control_channel_closed" | "peer_connection_lost";
 
 type CameraIndex = 1 | 2;
 
@@ -42,7 +45,7 @@ export interface RtcGatewayOptions {
   maxVideoBitrate?: number;
   onControl: (message: Record<string, unknown>) => void;
   onSafetyStop: () => void;
-  onControlLost: () => void;
+  onControlLost: (reason: ControlLossReason, idleMs: number) => void;
 }
 
 /**
@@ -141,13 +144,27 @@ export class RtcGateway {
       lastSequence: -1,
       lastControlAt: 0,
       closed: false,
+      disconnectTimer: null,
     };
     this.peers.set(peer.id, peer);
     peer.pc.ondatachannel = (event: { channel: RTCDataChannel }) => this.attachChannel(peer, event.channel);
     peer.pc.onconnectionstatechange = () => {
       const state = peer.pc.connectionState;
-      if (state === "failed" || state === "closed" || state === "disconnected") {
-        this.removePeer(peer);
+      if (state === "connected" && peer.disconnectTimer) {
+        clearTimeout(peer.disconnectTimer);
+        peer.disconnectTimer = null;
+      } else if (state === "disconnected" && !peer.disconnectTimer) {
+        // ICE may briefly report disconnected while Wi-Fi changes rate/channel.
+        // Give it time to recover before replacing a working DataChannel.
+        peer.disconnectTimer = setTimeout(() => {
+          peer.disconnectTimer = null;
+          if (peer.pc.connectionState === "disconnected") {
+            void this.removePeer(peer, "peer_connection_lost");
+          }
+        }, 3000);
+        peer.disconnectTimer.unref();
+      } else if (state === "failed" || state === "closed") {
+        void this.removePeer(peer, "peer_connection_lost");
       }
     };
 
@@ -201,7 +218,12 @@ export class RtcGateway {
     const peers = [...this.peers.values()];
     this.peers.clear();
     this.controlOwner = null;
-    for (const peer of peers) peer.pc.close();
+    for (const peer of peers) {
+      peer.closed = true;
+      if (peer.disconnectTimer) clearTimeout(peer.disconnectTimer);
+      peer.disconnectTimer = null;
+      peer.pc.close();
+    }
     await Promise.all([...this.videoDecoders.values()].map((decoder) => decoder.terminate()));
     this.videoDecoders.clear();
   }
@@ -219,7 +241,7 @@ export class RtcGateway {
     channel.onclose = () => {
       peer.channels.delete(channel.label);
       if (channel.label === "robot-control-v1" && this.controlOwner === peer.id) {
-        this.releaseControl(peer, true);
+        this.releaseControl(peer, true, "control_channel_closed");
       }
     };
   }
@@ -296,26 +318,29 @@ export class RtcGateway {
     if (!this.controlOwner) return;
     const peer = this.peers.get(this.controlOwner);
     if (!peer || Date.now() - peer.lastControlAt > this.controlTimeoutMs) {
-      if (peer) this.releaseControl(peer, true);
+      if (peer) this.releaseControl(peer, true, "watchdog_timeout");
       else {
         this.controlOwner = null;
-        this.onControlLost();
+        this.onControlLost("peer_connection_lost", 0);
       }
     }
   }
 
-  private releaseControl(peer: RtcPeer, notifyLoss: boolean): void {
+  private releaseControl(peer: RtcPeer, notifyLoss: boolean, reason: ControlLossReason = "peer_connection_lost"): void {
     if (this.controlOwner !== peer.id) return;
+    const idleMs = peer.lastControlAt > 0 ? Date.now() - peer.lastControlAt : 0;
     this.controlOwner = null;
     peer.lastControlAt = 0;
-    if (notifyLoss) this.onControlLost();
+    if (notifyLoss) this.onControlLost(reason, idleMs);
   }
 
-  private async removePeer(peer: RtcPeer): Promise<void> {
+  private async removePeer(peer: RtcPeer, reason: ControlLossReason = "peer_connection_lost"): Promise<void> {
     if (peer.closed) return;
     peer.closed = true;
+    if (peer.disconnectTimer) clearTimeout(peer.disconnectTimer);
+    peer.disconnectTimer = null;
     this.peers.delete(peer.id);
-    this.releaseControl(peer, true);
+    this.releaseControl(peer, true, reason);
     peer.pc.close();
   }
 

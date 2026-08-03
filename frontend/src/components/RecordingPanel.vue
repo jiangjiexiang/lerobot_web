@@ -1,7 +1,7 @@
 <template>
   <div class="recording-panel">
     <div class="heading">
-      <div><h2>数据集录制</h2></div>
+      <div><h2>数据录制</h2></div>
       <span class="state" :class="recording.state"><i></i>{{ stateText }}</span>
     </div>
 
@@ -19,7 +19,6 @@
         <label>复位时间（秒）<input v-model.number="form.resetTime" type="number" min="0" max="3600" /></label>
       </div>
       <label class="resume"><input v-model="form.resume" type="checkbox" /> 续录到已有同名数据集</label>
-      <p class="camera-note">双摄像头应连接不同 USB HUB · MJPG 640×360@30 FPS</p>
       <p v-if="recording.error" class="error">{{ recording.error }}</p>
       <p v-else-if="recording.path && recording.frames" class="saved">片段 {{ recording.episode ?? "-" }} 已保存 · {{ recording.frames }} 帧</p>
       <button class="record" :disabled="!running || busy || !valid" @click="$emit('start', { ...form })"><span>●</span>开始录制</button>
@@ -55,33 +54,31 @@ const stateText = computed(() => ({ idle: "待机", preparing: "准备中", reco
 </script>
 
 <style scoped>
-.recording-panel { display: flex; flex-direction: column; gap: 11px; }
-.heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
-.kicker { color: #d2a85e; font-size: 10px; font-weight: 700; letter-spacing: 1.2px; }
-h2 { margin-top: 3px; font-size: 17px; }
-.state { display: flex; align-items: center; gap: 5px; color: #8399aa; font-size: 10px; }
+.recording-panel { display: flex; flex-direction: column; gap: 13px; padding: 18px; }
+.heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: -18px -18px 2px; padding: 17px 18px; border-bottom: 1px solid #e5e6e6; }
+h2 { color: #292b2e; font-size: 16px; }
+.state { display: flex; align-items: center; gap: 5px; padding: 5px 9px; border-radius: 12px; color: #777b7e; background: #f0f1f1; font-size: 10px; font-weight: 650; }
 .state i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-.state.recording { color: #ff7384; }
+.state.recording { color: #fff; background: #f04d52; }
 .state.recording i { animation: pulse 1s ease-in-out infinite; }
-.state.preparing, .state.saving { color: #f0c76a; }
-.state.error, .error { color: #ff9aaa; }
-label { display: grid; gap: 4px; color: #afc0d2; font-size: 11px; }
-input, select { width: 100%; padding: 8px; border: 1px solid #29435f; border-radius: 7px; outline: none; background: #0a1728; color: #edf5ff; font-size: 12px; }
-input:focus, select:focus { border-color: #5a8bad; }
+.state.preparing, .state.saving { color: #a46b17; background: #fff5df; }
+.state.error, .error { color: #c9363b; }
+label { display: grid; gap: 5px; color: #616568; font-size: 12px; font-weight: 600; }
+input, select { width: 100%; padding: 10px; border: 1px solid #dedfe0; border-radius: 5px; outline: none; background: #fff; color: #27292b; font-size: 13px; }
+input:focus, select:focus { border-color: #75b99f; box-shadow: 0 0 0 3px rgba(66, 167, 129, .1); }
 button { min-height: 36px; border: 0; border-radius: 7px; cursor: pointer; font-weight: 650; }
 button:disabled { cursor: default; opacity: .45; }
-.record { margin-top: 2px; color: #fff; background: #b63f52; }
+.record { margin-top: 3px; min-height: 44px; color: #fff; background: #f04d52; font-size: 14px; }
+.record:hover:not(:disabled) { background: #db3d43; }
 .record span { margin-right: 6px; }
-.counter { display: grid; grid-template-columns: auto 1fr; align-items: baseline; gap: 4px 7px; padding: 12px; border: 1px solid rgba(255, 115, 132, .22); border-radius: 7px; background: #171823; }
-.counter strong { color: #fff; font: 700 28px/1 ui-monospace, monospace; }
-.counter span { color: #9fb0bf; font-size: 11px; }
-.counter small { grid-column: 1 / -1; color: #71889b; font-size: 10px; }
+.counter { display: grid; grid-template-columns: auto 1fr; align-items: baseline; gap: 4px 7px; padding: 12px; border: 1px solid #f2c9ca; border-radius: 5px; background: #fff8f8; }
+.counter strong { color: #d63f44; font: 700 28px/1 ui-monospace, monospace; }
+.counter span { color: #777b7e; font-size: 11px; }
+.counter small { grid-column: 1 / -1; color: #85898c; font-size: 10px; }
 .task, .saved, .error { overflow-wrap: anywhere; font-size: 10px; line-height: 1.45; }
-.capture-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; }.capture-grid label { font-size: 9px; }.resume { display: flex; grid-template-columns: auto 1fr; align-items: center; gap: 6px; }.resume input { width: auto; }.camera-note { padding: 6px 7px; border-left: 2px solid #d2a85e; background: #211d18; color: #a99570; font-size: 8px; line-height: 1.4; }
-.task { color: #9eb0bf; }
-.saved { color: #69d7a3; }
+.capture-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 7px; }.capture-grid label { font-size: 10px; }.resume { display: flex; grid-template-columns: auto 1fr; align-items: center; gap: 6px; }.resume input { width: auto; }.camera-note { padding: 7px 8px; border-left: 2px solid #68b693; background: #f3faf7; color: #52866f; font-size: 9px; line-height: 1.4; }
+.task { color: #5e6265; }.saved { color: #258260; }
 .actions { display: grid; grid-template-columns: .8fr 1.4fr; gap: 7px; }
-.discard { color: #d0dae2; background: #344252; }
-.save { color: #101820; background: #edc05f; }
+.discard { color: #55595c; background: #eaebeb; }.save { color: #fff; background: #f04d52; }
 @keyframes pulse { 50% { opacity: .25; } }
 </style>

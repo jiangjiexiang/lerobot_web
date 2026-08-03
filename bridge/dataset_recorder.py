@@ -118,7 +118,7 @@ def main() -> None:
     parser.add_argument("--repo-id", required=True)
     parser.add_argument("--fps", type=int, required=True)
     parser.add_argument("--task", required=True)
-    parser.add_argument("--robot-type", default="ros2_robot")
+    parser.add_argument("--robot-type", default="so101_follower")
     parser.add_argument("--streaming-encoding", choices=("auto", "on", "off"), default="auto")
     parser.add_argument("--vcodec", default="")
     args = parser.parse_args()
@@ -153,8 +153,7 @@ def main() -> None:
                     follower_names = list(follower)
                     if not leader_names or set(leader_names) != set(follower_names):
                         raise ValueError("Leader action 与 Follower state 的关节名称不一致")
-                    # ROS JointState preserves driver order. SO101's legacy JSON order is
-                    # also stable, so the first valid frame defines the dataset schema.
+                    # 首帧的稳定关节顺序定义整个数据集 schema。
                     joint_names = leader_names
                 if dataset is None:
                     dataset = open_dataset(args, camera, camera2, joint_names)

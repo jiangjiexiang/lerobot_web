@@ -1,5 +1,6 @@
 import express from "express";
-import { createServer } from "http";
+import { createServer as createHttpServer } from "http";
+import { createServer as createHttpsServer } from "https";
 import { WebSocketServer, WebSocket } from "ws";
 import cors from "cors";
 import path from "path";
@@ -15,23 +16,11 @@ import { CameraBridgeMessage, GStreamerCameraBridge } from "./gstreamerCameraBri
 // 配置
 const PORT = parseInt(process.env.PORT || "43127");
 const BRIDGE_DIR = process.env.BRIDGE_DIR || path.join(__dirname, "../../bridge");
-const CONTROL_BACKEND = process.env.CONTROL_BACKEND || "ros2";
-const ROS2_DRIVER = process.env.ROS2_DRIVER || "lerobot";
-const CONFIGURED_COMMAND_SOURCE = process.env.ROS2_COMMAND_SOURCE || "";
-const LEGACY_TELEOP_SCRIPT = path.join(BRIDGE_DIR, "teleop_mujoco.py");
-const ROS2_BRIDGE_SCRIPT = process.env.ROS2_BRIDGE_SCRIPT
-  || path.join(__dirname, "../../ros2_ws/src/lerobot_ros2_bridge/lerobot_ros2_bridge/web_bridge.py");
-const ROS2_IDLE_TOPICS_SCRIPT = process.env.ROS2_IDLE_TOPICS_SCRIPT
-  || path.join(__dirname, "../../ros2_ws/src/lerobot_ros2_bridge/lerobot_ros2_bridge/idle_topics.py");
-const TELEOP_SCRIPT = CONTROL_BACKEND === "legacy" ? LEGACY_TELEOP_SCRIPT : ROS2_BRIDGE_SCRIPT;
+const TELEOP_SCRIPT = path.join(BRIDGE_DIR, "teleop_robot.py");
 const RECORDER_SCRIPT = path.join(BRIDGE_DIR, "dataset_recorder.py");
 const DATASET_CATALOG_SCRIPT = path.join(BRIDGE_DIR, "dataset_catalog.py");
-const ROSBAG_QOS_CONFIG = process.env.ROSBAG_QOS_CONFIG
-  || path.join(__dirname, "../../ros2_ws/src/lerobot_ros2_bridge/config/rosbag_qos.yaml");
 const PYTHON_PATH = process.env.PYTHON_PATH || "python3";
-const CONTROL_PYTHON_PATH = CONTROL_BACKEND === "legacy"
-  ? PYTHON_PATH
-  : process.env.ROS_PYTHON_PATH || "/usr/bin/python3";
+const CONTROL_PYTHON_PATH = PYTHON_PATH;
 const FRONTEND_DIST = path.join(__dirname, "../../frontend/dist");
 const DATASET_ROOT = path.resolve(process.env.DATASET_ROOT || path.join(process.env.HOME || "/tmp", "lerobot_datasets"));
 const ENABLE_CAMERA = process.env.ENABLE_CAMERA !== "0" && process.env.ENABLE_CAMERA !== "false";
@@ -40,11 +29,8 @@ const CAMERA_WIDTH = parseInt(process.env.CAMERA_WIDTH || "640", 10);
 const CAMERA_HEIGHT = parseInt(process.env.CAMERA_HEIGHT || "360", 10);
 const RECORDING_MAX_SENSOR_AGE_MS = parseInt(process.env.RECORDING_MAX_SENSOR_AGE_MS || "250", 10);
 const RECORDING_MAX_CAMERA_SKEW_MS = parseInt(process.env.RECORDING_MAX_CAMERA_SKEW_MS || "100", 10);
-const ROSBAG_ENABLED = process.env.ROSBAG_ENABLED !== "0" && process.env.ROSBAG_ENABLED !== "false";
-const ROSBAG_REQUIRE_MCAP = process.env.ROSBAG_REQUIRE_MCAP === "1" || process.env.ROSBAG_REQUIRE_MCAP === "true";
 const DATASET_STREAMING_ENCODING = process.env.DATASET_STREAMING_ENCODING || "auto";
 const DATASET_VIDEO_CODEC = process.env.DATASET_VIDEO_CODEC || "auto";
-const DEFAULT_STREAM_FPS = parseInt(process.env.STREAM_FPS || "0", 10);
 const CONTROL_OBSERVATION_FPS = parseInt(process.env.CONTROL_OBSERVATION_FPS || "30", 10);
 const ENABLE_WEBRTC = process.env.ENABLE_WEBRTC !== "0" && process.env.ENABLE_WEBRTC !== "false";
 const ENABLE_WEBRTC_VIDEO = process.env.ENABLE_WEBRTC_VIDEO === "1" || process.env.ENABLE_WEBRTC_VIDEO === "true";
@@ -156,7 +142,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const server = createServer(app);
+const httpsCert = process.env.HTTPS_CERT;
+const httpsKey = process.env.HTTPS_KEY;
+const server = httpsCert && httpsKey
+  ? createHttpsServer({ cert: fs.readFileSync(httpsCert), key: fs.readFileSync(httpsKey) }, app)
+  : createHttpServer(app);
 // 控制和视频必须使用不同连接；视频拥塞时不能阻塞 30/60Hz 控制链路。
 const controlWss = new WebSocketServer({ noServer: true });
 const streamWss = new WebSocketServer({ noServer: true });
@@ -178,33 +168,14 @@ const streamManager = new MJPEGStreamManager();
 
 // 桥接状态
 let bridge: RobotBridge | null = null;
-let idleRosTopics: RobotBridge | null = null;
 let stopping = false;
 let shuttingDown = false;
 let remoteLeaderActive = false;
-let activeCommandSource: "leader" | "web" | "ros" | null = null;
 let latestObservation: BridgeMessage | null = null;
 let latestObservationAt = 0;
 const clients = new Set<WebSocket>();
 const streamClients = new Set<WebSocket>();
 let controlDisconnectTimer: NodeJS.Timeout | null = null;
-
-function startIdleRosTopics(): void {
-  if (CONTROL_BACKEND !== "ros2" || idleRosTopics?.isRunning()) return;
-  const idle = new RobotBridge(ROS2_IDLE_TOPICS_SCRIPT, [], CONTROL_PYTHON_PATH);
-  idleRosTopics = idle;
-  idle.on("exit", (code) => {
-    if (idleRosTopics === idle) idleRosTopics = null;
-    if (!shuttingDown && code !== 0) {
-      console.error(`[ROS2] 空闲话题节点异常退出 (code=${code})`);
-    }
-  });
-  idle.on("error", (err) => console.error("[ROS2] 空闲话题节点启动失败:", err));
-  idle.start();
-  console.log("[ROS2] 已启动空闲话题: /follower/joint_states, /camera1/image_raw/compressed, /camera2/image_raw/compressed");
-}
-
-startIdleRosTopics();
 
 function stopTeleop(): boolean {
   if (!bridge || !bridge.isRunning()) return false;
@@ -268,12 +239,6 @@ function startCamera(index: number): void {
       cameraLocalFrameAt = Date.now();
       streamManager.updateFrame("camera", jpeg);
       broadcastBinaryFrame(STREAM_TYPE_CAMERA, typeof msg.ts === "number" ? msg.ts : Date.now() / 1000, jpeg);
-      if (bridge?.isRunning()) {
-        bridge.send({ type: "ros_camera_frame", camera: "camera1", data: jpeg.toString("base64"), ts: msg.ts });
-      }
-      if (!bridge?.isRunning() && idleRosTopics?.isRunning()) {
-        idleRosTopics.send({ type: "ros_camera_frame", camera: "camera1", data: jpeg.toString("base64"), ts: msg.ts });
-      }
     } else if (msg.type === "camera_error") {
       cameraError = String(msg.error || "摄像头不可用");
       console.error(`[Camera] ${cameraError}`);
@@ -312,12 +277,6 @@ function startCamera2(index: number): void {
       camera2LocalFrameAt = Date.now();
       streamManager.updateFrame("camera2", jpeg);
       broadcastBinaryFrame(STREAM_TYPE_CAMERA2, typeof msg.ts === "number" ? msg.ts : Date.now() / 1000, jpeg);
-      if (bridge?.isRunning()) {
-        bridge.send({ type: "ros_camera_frame", camera: "camera2", data: jpeg.toString("base64"), ts: msg.ts });
-      }
-      if (!bridge?.isRunning() && idleRosTopics?.isRunning()) {
-        idleRosTopics.send({ type: "ros_camera_frame", camera: "camera2", data: jpeg.toString("base64"), ts: msg.ts });
-      }
     } else if (msg.type === "camera_error") {
       camera2Error = String(msg.error || "摄像头不可用");
       console.error(`[Camera2] ${camera2Error}`);
@@ -359,19 +318,14 @@ interface RecordingStatus {
   episodeTime: number;
   resetTime: number;
   resume: boolean;
-  rawBagPath: string | null;
-  rawBagStorage: string | null;
-  rawBagError: string | null;
 }
 
 let recorder: RobotBridge | null = null;
-let rawBagProcess: ChildProcess | null = null;
 let recorderFramePending = false;
 let nextRecorderFrameAt = 0;
 let recordingStatus: RecordingStatus = {
   state: "idle", dataset: null, task: null, fps: 30, frames: 0,
   episode: null, path: null, error: null, plannedEpisodes: 10, episodeTime: 20, resetTime: 5, resume: false,
-  rawBagPath: null, rawBagStorage: null, rawBagError: null,
 };
 
 function publishRecordingStatus(): void {
@@ -381,8 +335,6 @@ function publishRecordingStatus(): void {
 function requestRecordingSave(): boolean {
   if (!recorder?.isRunning() || !["preparing", "recording"].includes(recordingStatus.state)) return false;
   recordingStatus = { ...recordingStatus, state: "saving" };
-  bridge?.send({ type: "capture_sync", enabled: false });
-  stopRawBag();
   publishRecordingStatus();
   recorder.send({ type: recordingStatus.frames > 0 ? "save_episode" : "cancel" });
   return true;
@@ -390,84 +342,6 @@ function requestRecordingSave(): boolean {
 
 function recordingIsActive(): boolean {
   return ["preparing", "recording", "saving"].includes(recordingStatus.state);
-}
-
-function hasRosbagStorage(storage: string): boolean {
-  try {
-    execFileSync("ros2", ["pkg", "prefix", `rosbag2_storage_${storage}`], { stdio: "ignore" });
-    return true;
-  } catch {
-    return storage === "sqlite3";
-  }
-}
-
-function startRawBag(datasetRoot: string): void {
-  if (!ROSBAG_ENABLED) return;
-  let storage = "mcap";
-  if (!hasRosbagStorage(storage)) {
-    if (ROSBAG_REQUIRE_MCAP) {
-      throw new Error("未安装 ros-humble-rosbag2-storage-mcap，且 ROSBAG_REQUIRE_MCAP 已启用");
-    }
-    storage = "sqlite3";
-  }
-  const bagPath = path.join(
-    DATASET_ROOT,
-    ".lerobot-web",
-    "raw-bags",
-    path.basename(datasetRoot),
-    `episode-${new Date().toISOString().replace(/[:.]/g, "-")}`,
-  );
-  fs.mkdirSync(path.dirname(bagPath), { recursive: true });
-  const topics = [
-    "/leader/joint_states",
-    "/follower/joint_states",
-    "/follower/joint_trajectory_controller/joint_trajectory",
-    "/camera1/image_raw/compressed",
-    "/camera2/image_raw/compressed",
-  ];
-  const child = spawn(
-    "ros2",
-    [
-      "bag", "record",
-      "--storage", storage,
-      "--output", bagPath,
-      "--qos-profile-overrides-path", ROSBAG_QOS_CONFIG,
-      ...topics,
-    ],
-    { stdio: ["ignore", "ignore", "pipe"] },
-  );
-  rawBagProcess = child;
-  let errorOutput = "";
-  child.stderr?.on("data", (chunk) => {
-    errorOutput = (errorOutput + String(chunk)).slice(-4000);
-  });
-  child.on("error", (error) => {
-    if (rawBagProcess === child) rawBagProcess = null;
-    recordingStatus = { ...recordingStatus, rawBagError: error.message };
-    publishRecordingStatus();
-  });
-  child.on("exit", (code, signal) => {
-    if (rawBagProcess === child) rawBagProcess = null;
-    if (code && recordingIsActive()) {
-      recordingStatus = {
-        ...recordingStatus,
-        rawBagError: errorOutput.trim() || `ros2 bag 异常退出 (code=${code}, signal=${signal})`,
-      };
-      publishRecordingStatus();
-    }
-  });
-  recordingStatus = {
-    ...recordingStatus,
-    rawBagPath: bagPath,
-    rawBagStorage: storage,
-    rawBagError: storage === "mcap" ? null : "MCAP 插件未安装，已回退 sqlite3",
-  };
-}
-
-function stopRawBag(): void {
-  const child = rawBagProcess;
-  if (!child || child.exitCode !== null) return;
-  child.kill("SIGINT");
 }
 
 function cleanDatasetName(value: unknown): string | null {
@@ -2350,7 +2224,7 @@ app.post("/api/recording/start", (req, res) => {
   }
   const now = Date.now();
   if (!latestObservation || now - latestObservationAt > RECORDING_MAX_SENSOR_AGE_MS) {
-    res.status(409).json({ ok: false, error: "没有收到实时 ROS2 关节状态和动作，无法开始录制" });
+    res.status(409).json({ ok: false, error: "没有收到实时关节状态和动作，无法开始录制" });
     return;
   }
   if (
@@ -2374,7 +2248,7 @@ app.post("/api/recording/start", (req, res) => {
     "--repo-id", `local/${dataset}`,
     "--fps", String(fps),
     "--task", task,
-    "--robot-type", ROS2_DRIVER === "lerobot" ? "so101_follower" : "ros2_external",
+    "--robot-type", "so101_follower",
     "--streaming-encoding", DATASET_STREAMING_ENCODING,
     ...(DATASET_VIDEO_CODEC ? ["--vcodec", DATASET_VIDEO_CODEC] : []),
   ], PYTHON_PATH);
@@ -2389,27 +2263,13 @@ app.post("/api/recording/start", (req, res) => {
   recordingStatus = {
     state: "preparing", dataset, task, fps, frames: 0,
     episode: null, path: datasetPath, error: null, plannedEpisodes, episodeTime, resetTime, resume,
-    rawBagPath: null, rawBagStorage: null, rawBagError: null,
   };
-  try {
-    startRawBag(datasetPath);
-  } catch (error) {
-    recorder = null;
-    recordingStatus = {
-      ...recordingStatus,
-      state: "error",
-      error: error instanceof Error ? error.message : String(error),
-    };
-    res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
-    return;
-  }
 
   startedRecorder.on("message", (msg: BridgeMessage) => {
     if (recorder !== startedRecorder) return;
     switch (msg.type) {
       case "recorder_ready":
         recordingStatus = { ...recordingStatus, state: "recording" };
-        bridge?.send({ type: "capture_sync", enabled: true });
         break;
       case "dataset_opened":
         recordingStatus = {
@@ -2438,14 +2298,10 @@ app.post("/api/recording/start", (req, res) => {
         };
         break;
       case "recording_cancelled":
-        bridge?.send({ type: "capture_sync", enabled: false });
-        stopRawBag();
         recorderFramePending = false;
         recordingStatus = { ...recordingStatus, state: "idle", frames: 0 };
         break;
       case "recorder_error":
-        bridge?.send({ type: "capture_sync", enabled: false });
-        stopRawBag();
         recorderFramePending = false;
         recordingStatus = { ...recordingStatus, state: "error", error: String(msg.error || "录制进程异常") };
         break;
@@ -2458,8 +2314,6 @@ app.post("/api/recording/start", (req, res) => {
     if (recorder !== startedRecorder) return;
     recorder = null;
     recorderFramePending = false;
-    bridge?.send({ type: "capture_sync", enabled: false });
-    stopRawBag();
     if (recordingIsActive()) {
       recordingStatus = {
         ...recordingStatus,
@@ -2472,8 +2326,6 @@ app.post("/api/recording/start", (req, res) => {
   startedRecorder.on("error", (error) => {
     if (recorder !== startedRecorder) return;
     recordingStatus = { ...recordingStatus, state: "error", error: error.message };
-    bridge?.send({ type: "capture_sync", enabled: false });
-    stopRawBag();
     publishRecordingStatus();
   });
   startedRecorder.start();
@@ -2585,15 +2437,7 @@ app.get("/api/self-check", (req, res) => {
     checkedAt: new Date(now).toISOString(),
     server: { ok: true, running: bridge ? bridge.isRunning() && !stopping : false },
     capture: {
-      rosbagEnabled: ROSBAG_ENABLED,
-      mcapAvailable: hasRosbagStorage("mcap"),
-      storage: hasRosbagStorage("mcap") ? "mcap" : "sqlite3",
-      synchronizedTopics: [
-        "/leader/joint_states",
-        "/follower/joint_states",
-        "/camera1/image_raw/compressed",
-        "/camera2/image_raw/compressed",
-      ],
+      storage: "lerobot-dataset",
     },
     follower: {
       ports: serialPorts,
@@ -2640,25 +2484,15 @@ app.post("/api/start", (req, res) => {
     follower_id = "",
     leader_port = "/dev/ttyACM1",
     leader_id = "",
-    fps = 30,
-    stream_fps = DEFAULT_STREAM_FPS,
-    viewer = false,
+    // 控制链路默认 60 FPS；状态观测仍由 CONTROL_OBSERVATION_FPS 独立限频。
+    fps = 60,
     remote_leader = false,
-    command_source,
     camera_index = -1,
     camera_fps = 15,
   } = req.body;
-  const commandSource = (
-    CONTROL_BACKEND === "ros2"
-      ? CONFIGURED_COMMAND_SOURCE || command_source || (remote_leader ? "web" : "leader")
-      : remote_leader ? "web" : "leader"
-  ) as "leader" | "web" | "ros";
-  if (!["leader", "web", "ros"].includes(commandSource)) {
-    res.status(500).json({ ok: false, error: `ROS2_COMMAND_SOURCE 无效: ${commandSource}` });
-    return;
-  }
-  const requiresFollowerSerial = CONTROL_BACKEND === "legacy" || (CONTROL_BACKEND === "ros2" && ROS2_DRIVER === "lerobot");
-  const requiresLeaderSerial = requiresFollowerSerial && commandSource === "leader";
+  const commandSource = remote_leader ? "web" : "leader";
+  const requiresFollowerSerial = true;
+  const requiresLeaderSerial = commandSource === "leader";
 
   if (requiresFollowerSerial && (typeof follower_port !== "string" || !follower_port.startsWith("/dev/tty"))) {
     res.status(400).json({ ok: false, error: "Follower 串口无效" });
@@ -2692,17 +2526,10 @@ app.post("/api/start", (req, res) => {
     "--leader-id", leader_id,
     "--fps", String(fps),
     "--observation-fps", String(Math.max(1, Math.min(fps, CONTROL_OBSERVATION_FPS))),
-    "--stream-fps", String(stream_fps),
   ];
-  if (CONTROL_BACKEND === "ros2") {
-    args.unshift("--driver", ROS2_DRIVER);
-    args.push("--command-source", commandSource);
-    if (!ENABLE_CAMERA) args.push("--emit-camera-frames");
-  }
-  if (viewer) args.push("--viewer");
   if (remote_leader) args.push("--remote-leader");
 
-  console.log(`[Server] 启动 ${CONTROL_BACKEND} 控制桥: ${CONTROL_PYTHON_PATH} ${TELEOP_SCRIPT} ${args.join(" ")}`);
+  console.log(`[Server] 启动串口控制桥: ${CONTROL_PYTHON_PATH} ${TELEOP_SCRIPT} ${args.join(" ")}`);
 
   const startedBridge = new RobotBridge(TELEOP_SCRIPT, args, CONTROL_PYTHON_PATH);
   startedBridge.on("log", ({ level, message }) => {
@@ -2712,7 +2539,6 @@ app.post("/api/start", (req, res) => {
   });
   bridge = startedBridge;
   stopping = false;
-  activeCommandSource = commandSource;
   remoteLeaderActive = commandSource === "web";
   latestObservation = null;
   latestObservationAt = 0;
@@ -2729,28 +2555,6 @@ app.post("/api/start", (req, res) => {
         recordCaptureSample(msg);
         break;
 
-      case "ros_camera_frame":
-        if (msg.data && (msg.camera === "camera1" || msg.camera === "camera2")) {
-          const jpeg = Buffer.from(msg.data, "base64");
-          const timestamp = typeof msg.ts === "number" ? msg.ts : Date.now() / 1000;
-          if (msg.camera === "camera1") {
-            latestCameraFrame = jpeg;
-            cameraLastFrameAt = Date.now();
-            if (Date.now() - cameraLocalFrameAt > 100) {
-              streamManager.updateFrame("camera", jpeg);
-              broadcastBinaryFrame(STREAM_TYPE_CAMERA, timestamp, jpeg);
-            }
-          } else {
-            latestCamera2Frame = jpeg;
-            camera2LastFrameAt = Date.now();
-            if (Date.now() - camera2LocalFrameAt > 100) {
-              streamManager.updateFrame("camera2", jpeg);
-              broadcastBinaryFrame(STREAM_TYPE_CAMERA2, timestamp, jpeg);
-            }
-          }
-        }
-        break;
-
       default:
         console.log(`[Server] 未知消息类型: ${msg.type}`);
     }
@@ -2765,7 +2569,6 @@ app.post("/api/start", (req, res) => {
       bridge = null;
       stopping = false;
       remoteLeaderActive = false;
-      activeCommandSource = null;
       // 非用户主动停止且带非零退出码，说明 Python 侧崩溃；把报错原因推给前端弹窗提示。
       const crashError = !wasRequested && code !== 0 ? errorLine || `进程异常退出 (code=${code})` : null;
       broadcastControl({ type: "stopped", error: crashError });
@@ -2795,17 +2598,9 @@ app.get("/api/status", (req, res) => {
   res.json({
     running: bridge ? bridge.isRunning() && !stopping : false,
     clients: clients.size,
-    controlBackend: CONTROL_BACKEND,
-    rosDriver: CONTROL_BACKEND === "ros2" ? ROS2_DRIVER : null,
-    commandSource: CONTROL_BACKEND === "ros2" ? activeCommandSource || CONFIGURED_COMMAND_SOURCE || null : null,
+    controlBackend: "serial",
+    commandSource: remoteLeaderActive ? "web" : "leader",
     rtc: { enabled: rtcGateway.isEnabled(), peers: rtcGateway.peerCount() },
-    rosTopics: CONTROL_BACKEND === "ros2" ? {
-      leaderState: "/leader/joint_states",
-      followerState: "/follower/joint_states",
-      command: "/follower/joint_trajectory_controller/joint_trajectory",
-      camera1: "/camera1/image_raw/compressed",
-      camera2: "/camera2/image_raw/compressed",
-    } : null,
   });
 });
 
@@ -3004,11 +2799,9 @@ function shutdown(): void {
   shuttingDown = true;
   console.log("[Robot Server] 退出中...");
   if (bridge) bridge.stop();
-  if (idleRosTopics) idleRosTopics.stop();
   void rtcGateway.close();
   if (cameraBridge) cameraBridge.stop();
   if (cameraBridge2) cameraBridge2.stop();
-  stopRawBag();
   if (recorder) recorder.stop();
   for (const child of trainingProcesses.values()) child.kill("SIGTERM");
   for (const child of evaluationProcesses.values()) child.kill("SIGTERM");

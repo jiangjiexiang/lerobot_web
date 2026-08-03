@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ROS 2 遥操作、数据采集与数据管理一键启动（Robot Server + Vite）
+# 轻量遥操作、数据采集与数据管理一键启动（Robot Server）
 # 用法: ./start_robot.sh
 
 set -e
@@ -18,35 +18,26 @@ if [ -z "${PYTHON_PATH:-}" ]; then
 fi
 export PYTHON_PATH
 export LEROBOT_PYTHON_PATH="${LEROBOT_PYTHON_PATH:-$PYTHON_PATH}"
-export CONTROL_BACKEND="${CONTROL_BACKEND:-ros2}"
-export ROS2_DRIVER="${ROS2_DRIVER:-lerobot}"
-export ROS2_COMMAND_SOURCE="${ROS2_COMMAND_SOURCE:-}"
-export ROS_DISTRO="${ROS_DISTRO:-humble}"
-export ROS_PYTHON_PATH="${ROS_PYTHON_PATH:-/usr/bin/python3}"
-export PORT="${PORT:-43127}"
+export PORT="${PORT:-5173}"
 export ENABLE_CAMERA="${ENABLE_CAMERA:-1}"
 export CAMERA_FPS="${CAMERA_FPS:-30}"
 export CAMERA_WIDTH="${CAMERA_WIDTH:-640}"
 export CAMERA_HEIGHT="${CAMERA_HEIGHT:-360}"
-export STREAM_FPS="${STREAM_FPS:-0}"
+export CONTROL_OBSERVATION_FPS="${CONTROL_OBSERVATION_FPS:-30}"
 export RTC_VIDEO_FPS="${RTC_VIDEO_FPS:-15}"
 export RTC_VIDEO_BITRATE="${RTC_VIDEO_BITRATE:-1500000}"
+export RTC_CONTROL_TIMEOUT_MS="${RTC_CONTROL_TIMEOUT_MS:-2000}"
 export ENABLE_WEBRTC_VIDEO="${ENABLE_WEBRTC_VIDEO:-0}"
 HTTPS_CERT="${HTTPS_CERT:-}"
 HTTPS_KEY="${HTTPS_KEY:-}"
 AUTO_HTTPS="${AUTO_HTTPS:-1}"
 HTTPS_HOST="${HTTPS_HOST:-}"
-FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 
-echo "=== ROS 2 数据采集平台一键启动 ==="
-echo "Python: $PYTHON_PATH"
-if [ "$CONTROL_BACKEND" = "ros2" ]; then
-    echo "控制后端: ros2 / $ROS2_DRIVER${ROS2_COMMAND_SOURCE:+ / $ROS2_COMMAND_SOURCE}"
-else
-    echo "控制后端: legacy"
-fi
+echo "=== 机器人数据采集平台一键启动 ==="
+echo "Python 环境: 已就绪"
+echo "控制后端: 直连串口"
 if [ "$ENABLE_CAMERA" = "0" ]; then
-    echo "摄像头: 外部 ROS 2 话题"
+    echo "摄像头: 已关闭"
 else
     echo "摄像头: 自动检测 USB 摄像头 (GStreamer MJPG ${CAMERA_WIDTH}x${CAMERA_HEIGHT}@$CAMERA_FPS FPS)"
 fi
@@ -54,10 +45,6 @@ fi
 # 清理上次异常退出后仍占用服务端口的进程。
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
     echo "错误: PORT 必须是 1-65535 之间的整数: $PORT"
-    exit 1
-fi
-if ! [[ "$FRONTEND_PORT" =~ ^[0-9]+$ ]] || [ "$FRONTEND_PORT" -lt 1 ] || [ "$FRONTEND_PORT" -gt 65535 ]; then
-    echo "错误: FRONTEND_PORT 必须是 1-65535 之间的整数: $FRONTEND_PORT"
     exit 1
 fi
 
@@ -100,8 +87,8 @@ if [ -z "$HTTPS_CERT" ] && [ -z "$HTTPS_KEY" ] && [ "$AUTO_HTTPS" != "0" ]; then
     fi
 
     CERT_DIR="$DIR/.certs"
-    HTTPS_CERT="$CERT_DIR/lerobot-lan.crt"
-    HTTPS_KEY="$CERT_DIR/lerobot-lan.key"
+    HTTPS_CERT="$CERT_DIR/robot-lan.crt"
+    HTTPS_KEY="$CERT_DIR/robot-lan.key"
     if [ ! -f "$HTTPS_CERT" ] || [ ! -f "$HTTPS_KEY" ] \
         || ! openssl x509 -in "$HTTPS_CERT" -noout -checkip "$HTTPS_HOST" >/dev/null 2>&1; then
         echo "正在为 $HTTPS_HOST 生成局域网 HTTPS 证书..."
@@ -121,12 +108,8 @@ else
 fi
 echo ""
 
-# LeRobot、摄像头或旧后端需要通用 Python；纯 external ROS 2 模式可不依赖 LeRobot 环境。
-NEEDS_APP_PYTHON=0
-if [ "$CONTROL_BACKEND" = "legacy" ] || [ "$ROS2_DRIVER" = "lerobot" ] || [ "$ENABLE_CAMERA" != "0" ]; then
-    NEEDS_APP_PYTHON=1
-fi
-if [ "$NEEDS_APP_PYTHON" -eq 1 ] && [[ "$PYTHON_PATH" == */* ]]; then
+# 串口控制、录制与摄像头都使用项目 Python 环境。
+if [[ "$PYTHON_PATH" == */* ]]; then
     if [ ! -f "$PYTHON_PATH" ] || [ ! -x "$PYTHON_PATH" ]; then
         echo "错误: Python 可执行文件不存在或不可执行: $PYTHON_PATH"
         exit 1
@@ -149,17 +132,14 @@ if [ "$ENABLE_CAMERA" != "0" ]; then
         exit 1
     fi
     if ! "$PYTHON_PATH" -c "from lerobot.datasets.lerobot_dataset import LeRobotDataset" >/dev/null 2>&1; then
-        echo "错误: $PYTHON_PATH 缺少 LeRobotDataset 采集依赖"
-        echo "请在 LeRobot 环境安装项目与机械臂依赖，例如:"
-        echo "  $PYTHON_PATH -m pip install -e '/home/jiang/lerobot[feetech]'"
+        echo "错误: Python 环境缺少采集数据依赖"
+        echo "请安装项目与机械臂依赖后重试。"
         exit 1
     fi
 fi
-if [ "$ROS2_DRIVER" = "lerobot" ]; then
-    if ! "$LEROBOT_PYTHON_PATH" -c "import scservo_sdk; from lerobot.motors.feetech import FeetechMotorsBus" >/dev/null 2>&1; then
-        echo "错误: $LEROBOT_PYTHON_PATH 缺少 LeRobot Feetech 电机依赖"
-        exit 1
-    fi
+if ! "$LEROBOT_PYTHON_PATH" -c "import scservo_sdk; from lerobot.motors.feetech import FeetechMotorsBus" >/dev/null 2>&1; then
+    echo "错误: Python 环境缺少 Feetech 电机依赖"
+    exit 1
 fi
 
 # 检查 Node.js 版本
@@ -172,49 +152,45 @@ if [ "$NODE_MAJOR" -lt 18 ]; then
     exit 1
 fi
 
-if [ "$CONTROL_BACKEND" = "ros2" ]; then
-    ROS_SETUP="/opt/ros/$ROS_DISTRO/setup.bash"
-    if [ ! -f "$ROS_SETUP" ]; then
-        echo "错误: 找不到 ROS 2 环境: $ROS_SETUP"
-        exit 1
-    fi
-    # ROS 2 Humble 的 rclpy 必须由它对应的系统 Python 运行；LeRobot 仍由上面的独立环境运行。
-    source "$ROS_SETUP"
-    if ! "$ROS_PYTHON_PATH" -c "import rclpy, message_filters, sensor_msgs, trajectory_msgs" >/dev/null 2>&1; then
-        echo "错误: $ROS_PYTHON_PATH 无法导入 ROS 2 Python 包"
-        echo "请确认 ROS_DISTRO=$ROS_DISTRO 与 ROS_PYTHON_PATH 匹配"
-        exit 1
-    fi
-    if ! ros2 pkg prefix rosbag2_storage_mcap >/dev/null 2>&1; then
-        echo "警告: 未安装 MCAP 插件，原始 ROS bag 将回退到 sqlite3"
-        echo "      安装命令: bash scripts/install_ros2_capture_deps.sh"
-    fi
-fi
-
 # 安装依赖
 if [ ! -d "$DIR/robot-server/node_modules" ]; then
-    echo "[1/4] 安装 robot-server 依赖..."
+    echo "安装 robot-server 依赖..."
     cd "$DIR/robot-server" && npm install
+    chmod +x "$DIR/robot-server/node_modules/.bin/"* 2>/dev/null || true
 fi
 if [ ! -d "$DIR/frontend/node_modules" ]; then
-    echo "[2/4] 安装 frontend 依赖..."
+    echo "安装 frontend 依赖..."
     cd "$DIR/frontend" && npm install
+    chmod +x "$DIR/frontend/node_modules/.bin/"* 2>/dev/null || true
 fi
 
-# 修复 .bin 执行权限 (WSL2 常见问题)
-chmod +x "$DIR/robot-server/node_modules/.bin/"* 2>/dev/null || true
-chmod +x "$DIR/frontend/node_modules/.bin/"* 2>/dev/null || true
+# 生产模式直接由 Robot Server 托管前端，避免 Vite 代理视频造成 CPU 和网络队列抖动。
+FRONTEND_OUTPUT="$DIR/frontend/dist/index.html"
+if [ ! -f "$FRONTEND_OUTPUT" ] \
+    || [ "$DIR/frontend/vite.config.ts" -nt "$FRONTEND_OUTPUT" ] \
+    || find "$DIR/frontend/src" -type f -newer "$FRONTEND_OUTPUT" -print -quit | grep -q .; then
+    echo "前端源码有更新，正在构建生产资源..."
+    cd "$DIR/frontend"
+    npm run build
+fi
 
-# 先构建生产资源，Robot Server 可托管该目录；一键脚本仍启动 Vite，
-# 以便统一提供 5173 入口、API/WebSocket 代理和可选的局域网 HTTPS。
-echo "[3/4] 构建 frontend..."
-cd "$DIR/frontend"
-npm run build
+# 日常启动直接运行编译后的服务端；仅源文件变化时重新构建。
+BACKEND_OUTPUT="$DIR/robot-server/dist/index.js"
+BACKEND_NEEDS_BUILD=0
+if [ ! -f "$BACKEND_OUTPUT" ] \
+    || [ "$DIR/robot-server/tsconfig.json" -nt "$BACKEND_OUTPUT" ] \
+    || find "$DIR/robot-server/src" -type f -newer "$BACKEND_OUTPUT" -print -quit | grep -q .; then
+    BACKEND_NEEDS_BUILD=1
+fi
+if [ "$BACKEND_NEEDS_BUILD" -eq 1 ]; then
+    echo "服务端源码有更新，正在构建..."
+    cd "$DIR/robot-server"
+    npm run build
+fi
 
 # 后台启动 robot-server
-echo "[4/4] 启动 robot-server (端口 $PORT)..."
-cd "$DIR/robot-server"
-npm run dev &
+echo "启动 robot-server (端口 $PORT)..."
+node "$BACKEND_OUTPUT" &
 BACKEND_PID=$!
 
 cleanup() {
@@ -225,47 +201,30 @@ trap cleanup EXIT INT TERM
 
 # 等待后端就绪
 echo -n "      等待后端就绪"
-for i in $(seq 1 20); do
-    if curl --noproxy "*" -s "http://localhost:$PORT/health" > /dev/null 2>&1; then
+for i in $(seq 1 80); do
+    if curl --noproxy "*" --connect-timeout 0.1 --max-time 0.2 -k -s "$WEB_SCHEME://localhost:$PORT/health" > /dev/null 2>&1; then
         echo " OK"
         break
     fi
-    echo -n "."
-    sleep 1
-    if [ $i -eq 20 ]; then
+    if [ $((i % 10)) -eq 0 ]; then echo -n "."; fi
+    sleep 0.05
+    if [ "$i" -eq 80 ]; then
         echo " 超时"
         kill $BACKEND_PID 2>/dev/null
         exit 1
     fi
 done
 
-# 清理失效或遗留的 Vite 进程，确保页面固定使用 FRONTEND_PORT。
-FRONTEND_PIDS="$(lsof -t -iTCP:"$FRONTEND_PORT" -sTCP:LISTEN 2>/dev/null || true)"
-if [ -n "$FRONTEND_PIDS" ]; then
-    echo "清理端口 $FRONTEND_PORT 上的旧前端进程: $FRONTEND_PIDS"
-    kill $FRONTEND_PIDS 2>/dev/null || true
-    for _ in $(seq 1 20); do
-        if ! lsof -t -iTCP:"$FRONTEND_PORT" -sTCP:LISTEN >/dev/null 2>&1; then break; fi
-        sleep 0.1
-    done
-    FRONTEND_PIDS="$(lsof -t -iTCP:"$FRONTEND_PORT" -sTCP:LISTEN 2>/dev/null || true)"
-    if [ -n "$FRONTEND_PIDS" ]; then
-        echo "旧前端进程未正常退出，强制清理: $FRONTEND_PIDS"
-        kill -9 $FRONTEND_PIDS 2>/dev/null || true
-    fi
-fi
-
 echo ""
 echo "========================================"
 if [ -n "$HTTPS_HOST" ]; then
-    echo "  浏览器打开: $WEB_SCHEME://$HTTPS_HOST:$FRONTEND_PORT"
+    echo "  浏览器打开: $WEB_SCHEME://$HTTPS_HOST:$PORT"
 else
-    echo "  浏览器打开: $WEB_SCHEME://localhost:$FRONTEND_PORT"
+    echo "  浏览器打开: $WEB_SCHEME://localhost:$PORT"
 fi
-echo "  API 服务:   http://localhost:$PORT"
+echo "  API 服务:   $WEB_SCHEME://localhost:$PORT"
 echo "  Ctrl+C 退出"
 echo "========================================"
 echo ""
 
-cd "$DIR/frontend"
-npm run dev -- --host 0.0.0.0 --port "$FRONTEND_PORT" --strictPort
+wait "$BACKEND_PID"

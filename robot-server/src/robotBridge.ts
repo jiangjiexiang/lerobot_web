@@ -107,7 +107,7 @@ export class RobotBridge extends EventEmitter {
     if (!child || child.exitCode !== null) return;
 
     child.kill("SIGTERM");
-    // MuJoCo/串口驱动偶尔会阻塞在原生调用中；超过 2 秒仍未退出则强制回收。
+    // 串口驱动偶尔会阻塞在原生调用中；超过 2 秒仍未退出则强制回收。
     setTimeout(() => {
       if (child.exitCode === null) child.kill("SIGKILL");
     }, 2000).unref();
