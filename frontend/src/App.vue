@@ -46,8 +46,8 @@
           <div class="panel live-panel">
             <div class="workspace-heading"><div><p>实时可视化</p><h1>双臂采集视图</h1></div><span class="camera-count">2 路摄像头</span></div>
             <div class="camera-grid">
-              <section class="camera-view" aria-label="摄像头 1 画面"><CameraView :stream="cameraViewsSwapped ? camera2Stream : cameraStream" :frame="cameraViewsSwapped ? camera2Frame : cameraFrame" :fallback-src="cameraViewsSwapped ? '/video/camera2' : '/video/camera'" kicker="摄像头 1" title="实时画面" placeholder="等待摄像头 1 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera2 : activeCameras.camera}`" liveText="实时" waitText="等待" /></section>
-              <section class="camera-view" aria-label="摄像头 2 画面"><CameraView :stream="cameraViewsSwapped ? cameraStream : camera2Stream" :frame="cameraViewsSwapped ? cameraFrame : camera2Frame" :fallback-src="cameraViewsSwapped ? '/video/camera' : '/video/camera2'" kicker="摄像头 2" title="实时画面" placeholder="等待摄像头 2 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera : activeCameras.camera2}`" liveText="实时" waitText="等待" /></section>
+              <section class="camera-view" aria-label="摄像头 1 画面"><CameraView :stream="cameraViewsSwapped ? camera2Stream : cameraStream" :frame="cameraViewsSwapped ? camera2Frame : cameraFrame" :fallback-src="cameraViewsSwapped ? '/video/camera2' : '/video/camera'" :latency-ms="cameraViewsSwapped ? metrics.camera2Latency : metrics.cameraLatency" kicker="摄像头 1" title="实时画面" placeholder="等待摄像头 1 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera2 : activeCameras.camera}`" liveText="实时" waitText="等待" /></section>
+              <section class="camera-view" aria-label="摄像头 2 画面"><CameraView :stream="cameraViewsSwapped ? cameraStream : camera2Stream" :frame="cameraViewsSwapped ? cameraFrame : camera2Frame" :fallback-src="cameraViewsSwapped ? '/video/camera' : '/video/camera2'" :latency-ms="cameraViewsSwapped ? metrics.cameraLatency : metrics.camera2Latency" kicker="摄像头 2" title="实时画面" placeholder="等待摄像头 2 画面…" :hint="`/dev/video${cameraViewsSwapped ? activeCameras.camera : activeCameras.camera2}`" liveText="实时" waitText="等待" /></section>
             </div>
           </div>
           <div class="capture-details">
@@ -56,7 +56,7 @@
           </div>
         </section>
         <aside class="right-rail" aria-label="采集控制">
-          <section class="panel ctrl" aria-label="机械臂连接"><ControlPanel :ports="ports" :detected-cameras="detectedCameras" :active-cameras="activeCameras" :running="running" :busy="actionPending" :serial-connected="serialConnected" :serial-error="serialError" @refresh="fetchPorts" @start="handleStart" @stop="handleStop" @switch-camera="handleSwitchCamera" @swap-camera-views="handleSwapCameraViews" @connect-leader="handleConnectLeader" @disconnect-leader="disconnectLeader" /></section>
+          <section class="panel ctrl" aria-label="机械臂连接"><ControlPanel :ports="ports" :detected-cameras="detectedCameras" :active-cameras="activeCameras" :running="running" :busy="actionPending" :serial-connected="serialConnected" :serial-error="serialError" :control-latency="metrics.controlLatency" @refresh="fetchPorts" @start="handleStart" @stop="handleStop" @switch-camera="handleSwitchCamera" @swap-camera-views="handleSwapCameraViews" @connect-leader="handleConnectLeader" @disconnect-leader="disconnectLeader" /></section>
         </aside>
       </main>
       <DatasetWorkspace v-else-if="workspace === 'datasets'" />

@@ -68,6 +68,10 @@
           <option :value="60">60</option>
         </select>
       </div>
+      <div class="form-group latency-readout">
+        <label>控制延迟</label>
+        <output :class="{ pending: controlLatency === null }">{{ formatLatency(controlLatency) }}</output>
+      </div>
     </div>
 
     <template v-if="local.controlMode === 'web'">
@@ -100,6 +104,7 @@ const props = defineProps<{
   busy: boolean;
   serialConnected: boolean;
   serialError: string | null;
+  controlLatency: number | null;
 }>();
 
 const emit = defineEmits<{
@@ -140,6 +145,10 @@ function selectCamera(view: "camera" | "camera2", index: number) {
   if (view === "camera") local.cameraIndex = index;
   else local.camera2Index = index;
   emit("switchCamera", { view, index });
+}
+
+function formatLatency(value: number | null): string {
+  return value === null ? "--" : `${value} ms`;
 }
 
 
@@ -218,6 +227,18 @@ h2 { color: #282a2d; font-size: 16px; margin-top: 3px; letter-spacing: 0;
 .row2 > div {
   flex: 1;
 }
+.latency-readout output {
+  display: flex;
+  align-items: center;
+  min-height: 35px;
+  padding: 7px 8px;
+  border: 1px solid #dddedf;
+  border-radius: 5px;
+  background: #f7f8f8;
+  color: #246f54;
+  font: 600 13px ui-monospace, monospace;
+}
+.latency-readout output.pending { color: #8c9093; }
 .btn {
   padding: 10px;
   border: none;
